@@ -27,7 +27,7 @@ services:
   client-run:
     build:
       context: ..
-      dockerfile: client/Dockerfile
+      dockerfile: setup/Dockerfile
     image: thesis-tls-client:latest
     container_name: thesis-client-run
 
@@ -84,7 +84,7 @@ services:
   client-setup:
     build:
       context: ..
-      dockerfile: client/Dockerfile
+      dockerfile: setup/Dockerfile
     image: thesis-tls-client:latest
     container_name: thesis-client-setup
 
@@ -109,7 +109,7 @@ services:
   client-analyze:
     build:
       context: ..
-      dockerfile: client/Dockerfile
+      dockerfile: setup/Dockerfile
     image: thesis-tls-client:latest
     container_name: thesis-client-analyze
 
@@ -136,7 +136,7 @@ services:
   client-shell:
     build:
       context: ..
-      dockerfile: client/Dockerfile
+      dockerfile: setup/Dockerfile
     image: thesis-tls-client:latest
     container_name: thesis-client-shell
 
