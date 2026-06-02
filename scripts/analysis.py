@@ -10,15 +10,15 @@ Output:
   - feasibility_report.txt: Penilaian layak/tidak berdasarkan kriteria Subbab 3.5
 """
 
-import json
 import argparse
+import json
 import sys
 from pathlib import Path
 from typing import Optional
 
 try:
-    import pandas as pd
     import numpy as np
+    import pandas as pd
     from scipy import stats
 except ImportError:
     print("ERROR: Pastikan pandas, numpy, scipy sudah terinstall.")
@@ -29,16 +29,16 @@ except ImportError:
 # ─────────────────────────────────────────────────────────────────────────────
 # Kriteria evaluasi kelayakan (Subbab 3.5)
 # ─────────────────────────────────────────────────────────────────────────────
-THRESHOLD_LATENCY_OVERHEAD_PCT = 30.0   # Overhead TTLB/Handshake C vs A ≤ 30%
-THRESHOLD_CPU_PEAK_PCT         = 80.0   # CPU peak Skenario C ≤ 80%
+THRESHOLD_LATENCY_OVERHEAD_PCT = 30.0  # Overhead TTLB/Handshake C vs A ≤ 30%
+THRESHOLD_CPU_PEAK_PCT = 80.0  # CPU peak Skenario C ≤ 80%
 
 METRICS_LABELS = {
     "handshake_time_s": "Handshake Time (s)",
-    "ttfb_s":           "TTFB (s)",
-    "ttlb_s":           "TTLB (s)",
-    "cpu_peak_pct":     "CPU Peak (%)",
-    "cpu_mean_pct":     "CPU Mean (%)",
-    "ram_peak_bytes":   "RAM Peak (bytes)",
+    "ttfb_s": "TTFB (s)",
+    "ttlb_s": "TTLB (s)",
+    "cpu_peak_pct": "CPU Peak (%)",
+    "cpu_mean_pct": "CPU Mean (%)",
+    "ram_peak_bytes": "RAM Peak (bytes)",
 }
 
 
@@ -59,14 +59,14 @@ def descriptive_stats(series: pd.Series) -> dict:
     if len(s) == 0:
         return {"n": 0}
     return {
-        "n":      len(s),
+        "n": len(s),
         "median": float(s.median()),
-        "mean":   float(s.mean()),
-        "std":    float(s.std()),
-        "p05":    float(s.quantile(0.05)),
-        "p95":    float(s.quantile(0.95)),
-        "min":    float(s.min()),
-        "max":    float(s.max()),
+        "mean": float(s.mean()),
+        "std": float(s.std()),
+        "p05": float(s.quantile(0.05)),
+        "p95": float(s.quantile(0.95)),
+        "min": float(s.min()),
+        "max": float(s.max()),
     }
 
 
@@ -101,13 +101,13 @@ def wilcoxon_ranksum(a: pd.Series, b: pd.Series) -> dict:
     )
 
     return {
-        "u_stat":           float(u_stat),
-        "p_value":          float(p_value),
-        "significant":      bool(p_value < 0.05),
-        "effect_size_r":    float(r),
-        "median_a":         float(median_a),
-        "median_b":         float(median_b),
-        "overhead_pct":     float(overhead_pct),
+        "u_stat": float(u_stat),
+        "p_value": float(p_value),
+        "significant": bool(p_value < 0.05),
+        "effect_size_r": float(r),
+        "median_a": float(median_a),
+        "median_b": float(median_b),
+        "overhead_pct": float(overhead_pct),
         "interpretation": (
             f"Overhead {overhead_pct:+.1f}% — "
             + ("signifikan" if p_value < 0.05 else "TIDAK signifikan")
@@ -149,37 +149,38 @@ def assess_feasibility(df: pd.DataFrame) -> dict:
     1. Overhead TTLB/Handshake Skenario C vs A pada jaringan ideal ≤ 30%
     2. CPU peak Skenario C ≤ 80% dari kapasitas single-core
     """
+
     def get(sc, net, col):
         return df[(df["scenario"] == sc) & (df["network"] == net)][col].dropna()
 
     # ── Latency overhead (jaringan ideal) ────────────────────────────────
-    hs_a   = get("A", "ideal", "handshake_time_s").median()
-    hs_c   = get("C", "ideal", "handshake_time_s").median()
+    hs_a = get("A", "ideal", "handshake_time_s").median()
+    hs_c = get("C", "ideal", "handshake_time_s").median()
     hs_ovh = (hs_c - hs_a) / hs_a * 100 if hs_a else float("nan")
 
-    ttlb_a   = get("A", "ideal", "ttlb_s").median()
-    ttlb_c   = get("C", "ideal", "ttlb_s").median()
+    ttlb_a = get("A", "ideal", "ttlb_s").median()
+    ttlb_c = get("C", "ideal", "ttlb_s").median()
     ttlb_ovh = (ttlb_c - ttlb_a) / ttlb_a * 100 if ttlb_a else float("nan")
 
     # ── CPU overhead ─────────────────────────────────────────────────────
     cpu_c_p95 = get("C", "ideal", "cpu_peak_pct").quantile(0.95)
     cpu_c_max = get("C", "ideal", "cpu_peak_pct").max()
 
-    feas_hs   = hs_ovh   <= THRESHOLD_LATENCY_OVERHEAD_PCT
+    feas_hs = hs_ovh <= THRESHOLD_LATENCY_OVERHEAD_PCT
     feas_ttlb = ttlb_ovh <= THRESHOLD_LATENCY_OVERHEAD_PCT
-    feas_cpu  = cpu_c_p95 <= THRESHOLD_CPU_PEAK_PCT
+    feas_cpu = cpu_c_p95 <= THRESHOLD_CPU_PEAK_PCT
 
     return {
-        "handshake_overhead_pct":      float(hs_ovh),
-        "ttlb_overhead_pct":           float(ttlb_ovh),
-        "cpu_peak_p95_pct":            float(cpu_c_p95),
-        "cpu_peak_max_pct":            float(cpu_c_max),
-        "threshold_latency_pct":       THRESHOLD_LATENCY_OVERHEAD_PCT,
-        "threshold_cpu_pct":           THRESHOLD_CPU_PEAK_PCT,
-        "criterion_handshake_passed":  bool(feas_hs),
-        "criterion_ttlb_passed":       bool(feas_ttlb),
-        "criterion_cpu_passed":        bool(feas_cpu),
-        "overall_feasible":            bool(feas_hs and feas_ttlb and feas_cpu),
+        "handshake_overhead_pct": float(hs_ovh),
+        "ttlb_overhead_pct": float(ttlb_ovh),
+        "cpu_peak_p95_pct": float(cpu_c_p95),
+        "cpu_peak_max_pct": float(cpu_c_max),
+        "threshold_latency_pct": THRESHOLD_LATENCY_OVERHEAD_PCT,
+        "threshold_cpu_pct": THRESHOLD_CPU_PEAK_PCT,
+        "criterion_handshake_passed": bool(feas_hs),
+        "criterion_ttlb_passed": bool(feas_ttlb),
+        "criterion_cpu_passed": bool(feas_cpu),
+        "overall_feasible": bool(feas_hs and feas_ttlb and feas_cpu),
     }
 
 
@@ -198,35 +199,42 @@ def print_summary(report: dict):
             continue
         net_label = NETWORK_CONDITIONS_LABEL.get(network, network)
         print(f"\n  ▶ Jaringan: {net_label}")
-        print(f"  {'Metrik':<25} {'A median':>12} {'B median':>12} {'C median':>12} "
-              f"{'C vs A overhead':>16} {'Signifikan?':>12}")
-        print(f"  {'─'*25} {'─'*12} {'─'*12} {'─'*12} {'─'*16} {'─'*12}")
+        print(
+            f"  {'Metrik':<25} {'A median':>12} {'B median':>12} {'C median':>12} "
+            f"{'C vs A overhead':>16} {'Signifikan?':>12}"
+        )
+        print(f"  {'─' * 25} {'─' * 12} {'─' * 12} {'─' * 12} {'─' * 16} {'─' * 12}")
 
-        for metric in ["handshake_time_s", "ttfb_s", "ttlb_s",
-                        "cpu_peak_pct", "ram_peak_bytes"]:
+        for metric in [
+            "handshake_time_s",
+            "ttfb_s",
+            "ttlb_s",
+            "cpu_peak_pct",
+            "ram_peak_bytes",
+        ]:
             if metric not in report["metrics"].get(network, {}):
                 continue
             m = report["metrics"][network][metric]
             sc_a = m.get("scenario_A", {})
             sc_c = m.get("scenario_C", {})
-            wc   = m.get("wilcoxon_A_vs_C", {})
+            wc = m.get("wilcoxon_A_vs_C", {})
 
             # Format nilai sesuai unit
             def fmt(v, col):
                 if v is None or (isinstance(v, float) and np.isnan(v)):
                     return "   N/A"
                 if col == "ram_peak_bytes":
-                    return f"{v/1024:10.1f}KB"
+                    return f"{v / 1024:10.1f}KB"
                 elif col.endswith("_s"):
-                    return f"{v*1000:11.2f}ms"
+                    return f"{v * 1000:11.2f}ms"
                 else:
                     return f"{v:11.1f}%"
 
             a_med = sc_a.get("median")
             c_med = sc_c.get("median")
             b_med = m.get("scenario_B", {}).get("median")
-            ovh   = wc.get("overhead_pct", float("nan"))
-            sig   = "✓ Ya" if wc.get("significant") else "✗ Tidak"
+            ovh = wc.get("overhead_pct", float("nan"))
+            sig = "✓ Ya" if wc.get("significant") else "✗ Tidak"
 
             print(
                 f"  {METRICS_SHORT.get(metric, metric):<25}"
@@ -242,18 +250,24 @@ def print_summary(report: dict):
     print(f"\n{sep}")
     print(f"  PENILAIAN KELAYAKAN (Subbab 3.5)")
     print(sep)
-    print(f"  Overhead Handshake C vs A (ideal): "
-          f"{feas.get('handshake_overhead_pct', float('nan')):+.1f}% "
-          f"(threshold ≤{THRESHOLD_LATENCY_OVERHEAD_PCT}%) → "
-          + ("LULUS" if feas.get("criterion_handshake_passed") else "GAGAL"))
-    print(f"  Overhead TTLB       C vs A (ideal): "
-          f"{feas.get('ttlb_overhead_pct', float('nan')):+.1f}% "
-          f"(threshold ≤{THRESHOLD_LATENCY_OVERHEAD_PCT}%) → "
-          + ("LULUS" if feas.get("criterion_ttlb_passed") else "GAGAL"))
-    print(f"  CPU Peak P95       Skenario C:       "
-          f"{feas.get('cpu_peak_p95_pct', float('nan')):.1f}% "
-          f"(threshold ≤{THRESHOLD_CPU_PEAK_PCT}%) → "
-          + ("LULUS" if feas.get("criterion_cpu_passed") else "GAGAL"))
+    print(
+        f"  Overhead Handshake C vs A (ideal): "
+        f"{feas.get('handshake_overhead_pct', float('nan')):+.1f}% "
+        f"(threshold ≤{THRESHOLD_LATENCY_OVERHEAD_PCT}%) → "
+        + ("LULUS" if feas.get("criterion_handshake_passed") else "GAGAL")
+    )
+    print(
+        f"  Overhead TTLB       C vs A (ideal): "
+        f"{feas.get('ttlb_overhead_pct', float('nan')):+.1f}% "
+        f"(threshold ≤{THRESHOLD_LATENCY_OVERHEAD_PCT}%) → "
+        + ("LULUS" if feas.get("criterion_ttlb_passed") else "GAGAL")
+    )
+    print(
+        f"  CPU Peak P95       Skenario C:       "
+        f"{feas.get('cpu_peak_p95_pct', float('nan')):.1f}% "
+        f"(threshold ≤{THRESHOLD_CPU_PEAK_PCT}%) → "
+        + ("LULUS" if feas.get("criterion_cpu_passed") else "GAGAL")
+    )
     verdict = feas.get("overall_feasible")
     print(f"\n  Verdict: {'LULUS' if verdict else 'GAGAL'}")
     print(sep + "\n")
@@ -261,16 +275,16 @@ def print_summary(report: dict):
 
 METRICS_SHORT = {
     "handshake_time_s": "Handshake Time",
-    "ttfb_s":           "TTFB",
-    "ttlb_s":           "TTLB",
-    "cpu_peak_pct":     "CPU Peak",
-    "cpu_mean_pct":     "CPU Mean",
-    "ram_peak_bytes":   "RAM Peak",
+    "ttfb_s": "TTFB",
+    "ttlb_s": "TTLB",
+    "cpu_peak_pct": "CPU Peak",
+    "cpu_mean_pct": "CPU Mean",
+    "ram_peak_bytes": "RAM Peak",
 }
 
 NETWORK_CONDITIONS_LABEL = {
     "ideal": "Ideal (<1ms, 0% loss)",
-    "edge":  "Edge (100ms, 1% loss)",
+    "edge": "Edge (100ms, 1% loss)",
 }
 
 
@@ -282,11 +296,15 @@ def main():
         description="Analisis statistik hasil benchmark PQC TLS 1.3 [W6]"
     )
     parser.add_argument(
-        "--results-file", type=Path, required=True,
+        "--results-file",
+        type=Path,
+        required=True,
         help="Path ke file CSV hasil benchmark (results_combined_*.csv)",
     )
     parser.add_argument(
-        "--output-dir", type=Path, default=Path("/results"),
+        "--output-dir",
+        type=Path,
+        default=Path("/results"),
         help="Direktori output laporan",
     )
     args = parser.parse_args()
@@ -299,18 +317,20 @@ def main():
 
     print(f"Memuat data dari: {args.results_file}")
     df = load_results(args.results_file)
-    print(f"Total baris: {len(df)} | Skenario: {sorted(df['scenario'].unique())} | "
-          f"Jaringan: {sorted(df['network'].unique())}")
+    print(
+        f"Total baris: {len(df)} | Skenario: {sorted(df['scenario'].unique())} | "
+        f"Jaringan: {sorted(df['network'].unique())}"
+    )
 
     report = {
         "source_file": str(args.results_file),
-        "total_rows":  len(df),
-        "metrics":     {},
+        "total_rows": len(df),
+        "metrics": {},
         "feasibility": {},
     }
 
     networks = df["network"].unique().tolist()
-    metrics  = [m for m in METRICS_LABELS if m in df.columns]
+    metrics = [m for m in METRICS_LABELS if m in df.columns]
 
     for network in networks:
         report["metrics"][network] = {}
