@@ -1,25 +1,25 @@
 # =============================================================================
-# Dockerfile — TLS Client Container (Mesin Klien — Two-Machine Mode)
-# Base  : Ubuntu 22.04 (OpenSSL 3.0.x)
-# Builds: liboqs 0.11.0 + oqs-provider 0.7.0 (versi pinned, identik server)
-# Tools : tshark, tcpdump, iproute2 (tc/netem), Python 3.10+
+# Dockerfile — Mesin CLIENT
+# Base  : Ubuntu 22.04 (bawaan OpenSSL 3.0.x)
+# Builds: liboqs 0.11.0 + oqs-provider 0.7.0
+# Tools : Python 3, tshark, iproute2 (tc/netem), socat
 # =============================================================================
 
-# ---- Stage 1: Build liboqs + oqs-provider -----------------------------------
+# ── Stage 1: Build liboqs + oqs-provider ─────────────────────────────────────
 FROM ubuntu:22.04 AS builder
 
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y \
-        cmake ninja-build gcc g++ make \
-        libssl-dev \
-        python3-dev \
-        git \
-        pkg-config \
+        build-essential cmake ninja-build \
+        libssl-dev git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# --- Build liboqs ---
+# Versi dipinhole untuk reproducibility
 ARG LIBOQS_VERSION=0.11.0
+ARG OQS_PROVIDER_VERSION=0.7.0
+
+# Build liboqs
 WORKDIR /tmp
 RUN git clone --depth 1 --branch ${LIBOQS_VERSION} \
         https://github.com/open-quantum-safe/liboqs.git liboqs \
@@ -33,9 +33,8 @@ RUN git clone --depth 1 --branch ${LIBOQS_VERSION} \
     && ninja -C liboqs/build \
     && ninja -C liboqs/build install
 
-# --- Build oqs-provider ---
-# Ubuntu 22.04: cmake lib dir adalah /usr/local/lib (bukan lib64 seperti Fedora)
-ARG OQS_PROVIDER_VERSION=0.7.0
+# Build oqs-provider
+# Dipasang ke /usr/local tapi .so akan kita salin ke path yang benar di runtime stage
 RUN git clone --depth 1 --branch ${OQS_PROVIDER_VERSION} \
         https://github.com/open-quantum-safe/oqs-provider.git oqs-provider \
     && cmake -S oqs-provider -B oqs-provider/build \
@@ -47,57 +46,67 @@ RUN git clone --depth 1 --branch ${OQS_PROVIDER_VERSION} \
     && ninja -C oqs-provider/build install
 
 
-# ---- Stage 2: Runtime image -------------------------------------------------
+# ── Stage 2: Runtime image ────────────────────────────────────────────────────
 FROM ubuntu:22.04
-
-LABEL maintainer="thesis-research"
-LABEL description="TLS Hybrid Signature Client — Measurement Environment"
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# Runtime dependencies:
+#   openssl         : TLS client (s_client)
+#   python3 + pip   : benchmark.py, analysis.py
+#   tshark          : PCAP capture untuk pengukuran TTLB
+#   iproute2        : tc/netem untuk simulasi kondisi jaringan (edge)
+#   socat           : health check TCP port di server
+#   tcpdump         : fallback capture bila tshark bermasalah
+#   procps          : ps, top (monitoring proses)
 RUN apt-get update && apt-get install -y \
         openssl \
         python3 python3-pip \
         tshark \
-        tcpdump \
         iproute2 \
-        net-tools \
+        socat \
+        tcpdump \
         procps \
-        iputils-ping \
+        net-tools \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy liboqs shared libraries (Ubuntu: /usr/local/lib, bukan lib64)
-COPY --from=builder /usr/local/lib/liboqs.so*         /usr/local/lib/
-COPY --from=builder /usr/local/lib/cmake/liboqs        /usr/local/lib/cmake/liboqs/
+# Salin liboqs shared libraries dari builder
+COPY --from=builder /usr/local/lib/liboqs*          /usr/local/lib/
+COPY --from=builder /usr/local/lib/cmake/liboqs     /usr/local/lib/cmake/liboqs/
 
-# Copy oqs-provider ke path yang sesuai dengan openssl-oqs.cnf:
-#   module = /usr/lib64/ossl-modules/oqsprovider.so
-RUN mkdir -p /usr/lib64/ossl-modules
+# Salin oqs-provider ke path yang OpenSSL Ubuntu cari:
+# Ubuntu OpenSSL 3 mencari provider di /usr/lib/x86_64-linux-gnu/ossl-modules/
+RUN mkdir -p /usr/lib/x86_64-linux-gnu/ossl-modules
 COPY --from=builder /usr/local/lib/ossl-modules/oqsprovider.so \
-                    /usr/lib64/ossl-modules/
+                    /usr/lib/x86_64-linux-gnu/ossl-modules/
 
-# Register liboqs dengan dynamic linker
+# Daftarkan liboqs ke dynamic linker
 RUN echo '/usr/local/lib' > /etc/ld.so.conf.d/liboqs.conf && ldconfig
 
-# Install Python measurement dependencies
+# Install Python dependencies untuk benchmark.py dan analysis.py
 COPY setup/scripts/requirements.txt /tmp/requirements.txt
 RUN pip3 install --no-cache-dir -r /tmp/requirements.txt
 
-# Copy OpenSSL config (aktifkan oqs-provider secara global di container ini)
+# OpenSSL config: load default + oqs-provider secara bersamaan
+# Menggunakan file terpisah, bukan memodifikasi openssl.cnf sistem (lebih aman)
 COPY setup/config/openssl-oqs.cnf /etc/ssl/openssl-oqs.cnf
 ENV OPENSSL_CONF=/etc/ssl/openssl-oqs.cnf
 
-# Validasi: oqs-provider harus termuat saat build
-RUN openssl list -providers | grep -q "oqsprovider" \
-    && echo "oqs-provider loaded" \
-    || (echo "oqs-provider NOT found — build failed" && exit 1)
+# Izinkan tshark dijalankan tanpa root (CAP_NET_RAW tetap diperlukan di compose)
+RUN chmod +x /usr/bin/dumpcap 2>/dev/null || true
 
-# Validasi: algoritma hybrid harus tersedia
-RUN openssl list -signature-algorithms -provider oqs -provider default \
+# ── Validasi build ────────────────────────────────────────────────────────────
+# Gagal saat build jika oqs-provider tidak ter-load dengan benar
+RUN openssl list -providers 2>/dev/null | grep -q "oqsprovider" \
+    && echo "✓ oqs-provider loaded" \
+    || (echo "✗ oqs-provider NOT found — build failed" && exit 1)
+
+RUN openssl list -signature-algorithms -provider oqs -provider default 2>/dev/null \
     | grep -q "p256_dilithium2" \
-    && echo "p256_dilithium2 available" \
-    || (echo "p256_dilithium2 NOT found" && exit 1)
+    && echo "✓ p256_dilithium2 available" \
+    || (echo "✗ p256_dilithium2 NOT found" && exit 1)
 
+# Direktori kerja sesuai dengan volume mount di docker-compose.yml
 WORKDIR /measurement
 
-CMD ["bash"]
+CMD ["/bin/bash"]
