@@ -7,7 +7,6 @@
 name: thesis-tls-client
 
 services:
-
   # ── Eksperimen penuh ────────────────────────────────────────────────────────
   client-run:
     build:
@@ -21,11 +20,11 @@ services:
     network_mode: "host"
 
     cap_add:
-      - NET_ADMIN    # untuk tc/netem manipulasi delay pada NIC fisik
-      - NET_RAW      # untuk tshark raw socket packet capture
+      - NET_ADMIN # untuk tc/netem manipulasi delay pada NIC fisik
+      - NET_RAW # untuk tshark raw socket packet capture
 
     volumes:
-      - ../certs:/measurement/certs:ro  # Read-Only: Hanya membaca ca_*.crt dari Server
+      - ../certs:/measurement/certs:ro # Read-Only: Hanya membaca ca_*.crt dari Server
       - ../results:/measurement/results
       - ./scripts:/measurement/scripts:ro
       - ./config:/measurement/config:ro
@@ -57,7 +56,6 @@ services:
         max-size: "50m"
         max-file: "3"
 
-
   # ── Analisis hasil Statistik Wilcoxon [W6] ─────────────────────────────────
   client-analyze:
     build:
@@ -83,7 +81,6 @@ services:
       --output-dir /measurement/results/analysis
 
     restart: "no"
-
 
   # ── Shell interaktif untuk debugging manual ─────────────────────────────────
   client-shell:

@@ -41,7 +41,6 @@ RUN git clone --depth 1 --branch ${OQS_PROVIDER_VERSION} \
         -GNinja \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX=/usr/local \
-        -DOPENSSL_MODULES_PATH=/usr/local/lib/ossl-modules \
         -Dliboqs_DIR=/usr/local/lib/cmake/liboqs \
     && ninja -C oqs-provider/build \
     && ninja -C oqs-provider/build install
@@ -77,20 +76,20 @@ COPY --from=builder /usr/local/lib/cmake/liboqs     /usr/local/lib/cmake/liboqs/
 
 # Salin oqs-provider ke path yang OpenSSL Ubuntu cari:
 # Ubuntu OpenSSL 3 mencari provider di /usr/lib/x86_64-linux-gnu/ossl-modules/
-RUN mkdir -p /usr/lib64/ossl-modules
+RUN mkdir -p /usr/lib/x86_64-linux-gnu/ossl-modules
 COPY --from=builder /usr/local/lib/ossl-modules/oqsprovider.so \
-                    /usr/lib64/ossl-modules/
+                    /usr/lib/x86_64-linux-gnu/ossl-modules/
 
 # Daftarkan liboqs ke dynamic linker
 RUN echo '/usr/local/lib' > /etc/ld.so.conf.d/liboqs.conf && ldconfig
 
 # Install Python dependencies untuk benchmark.py dan analysis.py
-COPY setup/scripts/requirements.txt /tmp/requirements.txt
+COPY client/scripts/requirements.txt /tmp/requirements.txt
 RUN pip3 install --no-cache-dir -r /tmp/requirements.txt
 
 # OpenSSL config: load default + oqs-provider secara bersamaan
 # Menggunakan file terpisah, bukan memodifikasi openssl.cnf sistem (lebih aman)
-COPY setup/config/openssl-oqs.cnf /etc/ssl/openssl-oqs.cnf
+COPY client/config/openssl-oqs.cnf /etc/ssl/openssl-oqs.cnf
 ENV OPENSSL_CONF=/etc/ssl/openssl-oqs.cnf
 
 # Izinkan tshark dijalankan tanpa root (CAP_NET_RAW tetap diperlukan di compose)
