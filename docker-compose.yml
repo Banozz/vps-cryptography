@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # =============================================================================
 # docker-compose.yml — Mesin CLIENT (Two-Machine Mode - REVISED)
 # Setup: Laptop Klien (Fedora Linux Server OS Native)
@@ -118,5 +117,3 @@ services:
     command: bash
 
     restart: "no"
-=======
->>>>>>> 0bbac2e54fa681afa79707b5c70b4450f4f87659
