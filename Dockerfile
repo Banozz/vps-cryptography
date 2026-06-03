@@ -34,7 +34,8 @@ RUN git clone --depth 1 --branch ${LIBOQS_VERSION} \
     && ninja -C liboqs/build install
 
 # Build oqs-provider
-# Dipasang ke /usr/local tapi .so akan kita salin ke path yang benar di runtime stage
+# Setelah install, gunakan find untuk menjamin .so ada di path yang diketahui
+# (cmake oqs-provider bisa menginstall ke path sistem OpenSSL yang berbeda-beda)
 RUN git clone --depth 1 --branch ${OQS_PROVIDER_VERSION} \
         https://github.com/open-quantum-safe/oqs-provider.git oqs-provider \
     && cmake -S oqs-provider -B oqs-provider/build \
@@ -43,7 +44,9 @@ RUN git clone --depth 1 --branch ${OQS_PROVIDER_VERSION} \
         -DCMAKE_INSTALL_PREFIX=/usr/local \
         -Dliboqs_DIR=/usr/local/lib/cmake/liboqs \
     && ninja -C oqs-provider/build \
-    && ninja -C oqs-provider/build install
+    && ninja -C oqs-provider/build install \
+    && mkdir -p /usr/local/lib/ossl-modules \
+    && find /usr -name "oqsprovider.so" -exec cp {} /usr/local/lib/ossl-modules/ \;
 
 
 # ── Stage 2: Runtime image ────────────────────────────────────────────────────
