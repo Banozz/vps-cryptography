@@ -1,0 +1,122 @@
+<<<<<<< HEAD
+# =============================================================================
+# docker-compose.yml — Mesin CLIENT (Two-Machine Mode - REVISED)
+# Setup: Laptop Klien (Fedora Linux Server OS Native)
+# Target Server: Laptop Windows OS + Docker Desktop
+# =============================================================================
+
+name: thesis-tls-client
+
+services:
+
+  # ── Eksperimen penuh ────────────────────────────────────────────────────────
+  client-run:
+    build:
+      context: ..
+      dockerfile: setup/Dockerfile
+    image: thesis-tls-client:latest
+    container_name: thesis-client-run
+
+    # Host networking: container menggunakan NIC fisik laptop secara langsung.
+    # Diperlukan agar tc/netem dan tshark bisa mengakses kartu jaringan fisik Fedora.
+    network_mode: "host"
+
+    cap_add:
+      - NET_ADMIN    # untuk tc/netem manipulasi delay pada NIC fisik
+      - NET_RAW      # untuk tshark raw socket packet capture
+
+    volumes:
+      - ../certs:/measurement/certs:ro  # Read-Only: Hanya membaca ca_*.crt dari Server
+      - ../results:/measurement/results
+      - ./scripts:/measurement/scripts:ro
+      - ./config:/measurement/config:ro
+
+    environment:
+      # WAJIB di-export di host Fedora sebelum running: export SERVER_HOST=<IP_WINDOWS_FISIK>
+      - SERVER_HOST=${SERVER_HOST:?Set SERVER_HOST=192.168.100.23}
+
+      # Nama interface fisik kartu jaringan laptop Fedora (misal: enp2s0, wlan0)
+      - CAPTURE_IFACE=${CAPTURE_IFACE:-eth0}
+
+      - PAYLOAD_SIZE_KB=${PAYLOAD_SIZE_KB:-10}
+      - WARMUP_ITERS=${WARMUP_ITERS:-20}
+      - MEASURE_ITERS=${MEASURE_ITERS:-100}
+      - CERTS_DIR=/measurement/certs
+      - RESULTS_DIR=/measurement/results
+      - OPENSSL_CONF=/etc/ssl/openssl-oqs.cnf
+      - SCENARIOS=${SCENARIOS:-A,B,C}
+      - NETWORKS=${NETWORKS:-ideal,edge}
+
+    # Menjalankan script orkestrasi yang memanggil benchmark.py
+    command: bash /measurement/scripts/run_experiment.sh
+
+    restart: "no"
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
+
+
+  # ── Analisis hasil Statistik Wilcoxon [W6] ─────────────────────────────────
+  client-analyze:
+    build:
+      context: ..
+      dockerfile: setup/Dockerfile
+    image: thesis-tls-client:latest
+    container_name: thesis-client-analyze
+
+    network_mode: "none"
+
+    volumes:
+      - ../results:/measurement/results
+      - ./scripts:/measurement/scripts:ro
+
+    environment:
+      - RESULTS_DIR=/measurement/results
+      - OPENSSL_CONF=/etc/ssl/openssl-oqs.cnf
+
+    # REVISI: Diarahkan ke analysis.py dengan parameter file gabungan terbaru
+    command: >
+      python3 /measurement/scripts/analysis.py
+      --results-file /measurement/results/results_combined_latest.csv
+      --output-dir /measurement/results/analysis
+
+    restart: "no"
+
+
+  # ── Shell interaktif untuk debugging manual ─────────────────────────────────
+  client-shell:
+    build:
+      context: ..
+      dockerfile: setup/Dockerfile
+    image: thesis-tls-client:latest
+    container_name: thesis-client-shell
+
+    network_mode: "host"
+
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+
+    volumes:
+      - ../certs:/measurement/certs:ro
+      - ../results:/measurement/results
+      - ./scripts:/measurement/scripts
+      - ./config:/measurement/config
+
+    environment:
+      - SERVER_HOST=${SERVER_HOST:-192.168.100.23}
+      - CAPTURE_IFACE=${CAPTURE_IFACE:-eth0}
+      - OPENSSL_CONF=/etc/ssl/openssl-oqs.cnf
+      - CERTS_DIR=/measurement/certs
+      - RESULTS_DIR=/measurement/results
+
+    stdin_open: true
+    tty: true
+    command: bash
+
+    restart: "no"
+=======
+>>>>>>> 0bbac2e54fa681afa79707b5c70b4450f4f87659
