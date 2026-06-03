@@ -84,12 +84,12 @@ COPY --from=builder /usr/local/lib/ossl-modules/oqsprovider.so \
 RUN echo '/usr/local/lib' > /etc/ld.so.conf.d/liboqs.conf && ldconfig
 
 # Install Python dependencies untuk benchmark.py dan analysis.py
-COPY client/scripts/requirements.txt /tmp/requirements.txt
+COPY setup/scripts/requirements.txt /tmp/requirements.txt
 RUN pip3 install --no-cache-dir -r /tmp/requirements.txt
 
 # OpenSSL config: load default + oqs-provider secara bersamaan
 # Menggunakan file terpisah, bukan memodifikasi openssl.cnf sistem (lebih aman)
-COPY client/config/openssl-oqs.cnf /etc/ssl/openssl-oqs.cnf
+COPY setup/config/openssl-oqs.cnf /etc/ssl/openssl-oqs.cnf
 ENV OPENSSL_CONF=/etc/ssl/openssl-oqs.cnf
 
 # Izinkan tshark dijalankan tanpa root (CAP_NET_RAW tetap diperlukan di compose)
