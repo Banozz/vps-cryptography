@@ -19,7 +19,7 @@ oqs       = oqs_sect
 activate = 1
 
 [oqs_sect]
-module   = /usr/lib64/ossl-modules/oqsprovider.so
+module   = /usr/lib/x86_64-linux-gnu/ossl-modules/oqsprovider.so
 activate = 1
 
 # ── CA defaults (used during cert generation) ─────────────────────────────────
