@@ -52,7 +52,7 @@ RUN git clone --depth 1 --branch ${OQS_PROVIDER_VERSION} \
         -DOPENSSL_ROOT_DIR=/usr \
         -DCMAKE_PREFIX_PATH=/usr/local \
     && ninja -C oqs-provider/build \
-    && ninja -C oqs-provider/build install \
+    && ninja -C oqs-provider/build install
 
 # Bersihkan direktori temporary build
 RUN rm -rf /tmp/liboqs /tmp/oqs-provider
