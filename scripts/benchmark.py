@@ -13,33 +13,34 @@ Perubahan yang diakomodasi dari peringatan reviewer:
   [W6] Wilcoxon rank-sum test: tersedia di analysis.py (dipanggil otomatis)
 """
 
-import subprocess
-import time
-import threading
-import psutil
-import os
-import json
-import csv
 import argparse
+import csv
+import json
 import logging
-import tempfile
+import os
 import signal
-from pathlib import Path
+import subprocess
+import tempfile
+import threading
+import time
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
+
+import psutil
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Konfigurasi global
 # ─────────────────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    datefmt='%H:%M:%S',
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
 )
 logger = logging.getLogger(__name__)
 
 # [W3] Warmup dinaikkan dari 5 ke 20 iterasi
-WARMUP_ITERATIONS    = 20
+WARMUP_ITERATIONS = 20
 MEASUREMENT_ITERATIONS = 100
 # [W1] Jumlah iterasi untuk mengukur process spawn overhead
 SPAWN_OVERHEAD_ITERATIONS = 50
@@ -49,7 +50,7 @@ PAYLOAD_SIZE_KB = 10
 PAYLOAD_FILENAME = f"payload_{PAYLOAD_SIZE_KB}kb.bin"
 
 # Server host dan port (per skenario)
-SERVER_HOST   = os.environ.get("SERVER_HOST",   "pqc-server")
+SERVER_HOST = os.environ.get("SERVER_HOST", "pqc-server")
 PORT_SCENARIO = {
     "A": int(os.environ.get("SERVER_PORT_A", "4433")),
     "B": int(os.environ.get("SERVER_PORT_B", "4434")),
@@ -66,32 +67,32 @@ KEM_GROUPS = "kyber768:P-256:X25519"
 # ─────────────────────────────────────────────────────────────────────────────
 SCENARIOS = {
     "A": {
-        "name":     "Baseline ECDSA-P256",
-        "ca_cert":  "/certs/scenario_a/ca.crt",
-        "sigalgs":  "ecdsa_secp256r1_sha256",
+        "name": "Baseline ECDSA-P256",
+        "ca_cert": "/certs/scenario_a/ca.crt",
+        "sigalgs": "ecdsa_secp256r1_sha256",
     },
     "B": {
-        "name":     "Pure PQC Dilithium2",
-        "ca_cert":  "/certs/scenario_b/ca.crt",
-        "sigalgs":  "dilithium2",
+        "name": "Pure PQC Dilithium2",
+        "ca_cert": "/certs/scenario_b/ca.crt",
+        "sigalgs": "dilithium2",
     },
     "C": {
-        "name":     "OQS Hybrid p256_dilithium2",
-        "ca_cert":  "/certs/scenario_c/ca.crt",
-        "sigalgs":  "p256_dilithium2",
+        "name": "OQS Hybrid p256_dilithium2",
+        "ca_cert": "/certs/scenario_c/ca.crt",
+        "sigalgs": "p256_dilithium2",
     },
 }
 
 NETWORK_CONDITIONS = {
     "ideal": {
         "description": "Ideal (<1ms, 0% loss)",
-        "delay_ms":    0,
-        "loss_pct":    0.0,
+        "delay_ms": 0,
+        "loss_pct": 0.0,
     },
     "edge": {
         "description": "Edge (100ms, 1% loss)",
-        "delay_ms":    100,
-        "loss_pct":    1.0,
+        "delay_ms": 100,
+        "loss_pct": 1.0,
     },
 }
 
@@ -124,19 +125,17 @@ def measure_spawn_overhead(n: int = SPAWN_OVERHEAD_ITERATIONS) -> dict:
     times_ms = sorted(t * 1000 for t in times)
     n_samples = len(times_ms)
     median = times_ms[n_samples // 2]
-    p95    = times_ms[int(0.95 * n_samples)]
+    p95 = times_ms[int(0.95 * n_samples)]
 
-    logger.info(
-        f"[W1] Spawn overhead — median: {median:.3f}ms  P95: {p95:.3f}ms"
-    )
+    logger.info(f"[W1] Spawn overhead — median: {median:.3f}ms  P95: {p95:.3f}ms")
     return {
-        "n":           n_samples,
-        "median_ms":   median,
-        "mean_ms":     sum(times_ms) / n_samples,
-        "p95_ms":      p95,
-        "min_ms":      times_ms[0],
-        "max_ms":      times_ms[-1],
-        "samples_ms":  times_ms,
+        "n": n_samples,
+        "median_ms": median,
+        "mean_ms": sum(times_ms) / n_samples,
+        "p95_ms": p95,
+        "min_ms": times_ms[0],
+        "max_ms": times_ms[-1],
+        "samples_ms": times_ms,
     }
 
 
@@ -164,9 +163,17 @@ def configure_netem(condition: str, interface: str = "eth0"):
         return
 
     cmd = [
-        "tc", "qdisc", "add", "dev", interface, "root", "netem",
-        "delay", f"{params['delay_ms']}ms",
-        "loss",  f"{params['loss_pct']}%",
+        "tc",
+        "qdisc",
+        "add",
+        "dev",
+        interface,
+        "root",
+        "netem",
+        "delay",
+        f"{params['delay_ms']}ms",
+        "loss",
+        f"{params['loss_pct']}%",
     ]
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
@@ -191,12 +198,12 @@ class ResourceMonitor:
     """
 
     def __init__(self, pid: int, interval: float = CPU_POLL_INTERVAL_S):
-        self.pid       = pid
-        self.interval  = interval
-        self.cpu_pct:  list[float] = []
-        self.rss_bytes: list[int]  = []
-        self._stop     = threading.Event()
-        self._thread   = threading.Thread(target=self._run, daemon=True)
+        self.pid = pid
+        self.interval = interval
+        self.cpu_pct: list[float] = []
+        self.rss_bytes: list[int] = []
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
 
     def start(self):
         self._thread.start()
@@ -239,9 +246,12 @@ def start_tshark(port: int, pcap_path: str) -> subprocess.Popen:
     """Mulai tshark di background untuk merekam traffic di port tertentu."""
     cmd = [
         "tshark",
-        "-i", "eth0",
-        "-f", f"tcp port {port}",
-        "-w", pcap_path,
+        "-i",
+        "eth0",
+        "-f",
+        f"tcp port {port}",
+        "-w",
+        pcap_path,
         "-q",
     ]
     proc = subprocess.Popen(
@@ -275,28 +285,41 @@ def parse_ttlb_from_pcap(pcap_path: str, server_port: int) -> Optional[float]:
         # Timestamp ClientHello (tipe 1 = ClientHello dalam TLS handshake)
         ch_result = subprocess.run(
             [
-                "tshark", "-r", pcap_path,
-                "-Y", f"ssl.handshake.type == 1 and tcp.dstport == {server_port}",
-                "-T", "fields", "-e", "frame.time_epoch",
+                "tshark",
+                "-r",
+                pcap_path,
+                "-Y",
+                f"ssl.handshake.type == 1 and tcp.dstport == {server_port}",
+                "-T",
+                "fields",
+                "-e",
+                "frame.time_epoch",
             ],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True,
+            text=True,
+            timeout=15,
         )
 
         # Timestamp paket Application Data dari server ke client
         # content_type == 23 adalah TLS Application Data record
         app_result = subprocess.run(
             [
-                "tshark", "-r", pcap_path,
-                "-Y", (
-                    f"tls.record.content_type == 23 "
-                    f"and tcp.srcport == {server_port}"
-                ),
-                "-T", "fields", "-e", "frame.time_epoch",
+                "tshark",
+                "-r",
+                pcap_path,
+                "-Y",
+                (f"tls.record.content_type == 23 and tcp.srcport == {server_port}"),
+                "-T",
+                "fields",
+                "-e",
+                "frame.time_epoch",
             ],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True,
+            text=True,
+            timeout=15,
         )
 
-        ch_times  = [float(t) for t in ch_result.stdout.strip().split() if t]
+        ch_times = [float(t) for t in ch_result.stdout.strip().split() if t]
         app_times = [float(t) for t in app_result.stdout.strip().split() if t]
 
         if not ch_times or not app_times:
@@ -305,7 +328,7 @@ def parse_ttlb_from_pcap(pcap_path: str, server_port: int) -> Optional[float]:
 
         # t=0 diselaraskan ke timestamp ClientHello (sesuai Subbab 3.2.3)
         t_start = ch_times[0]
-        t_end   = max(app_times)
+        t_end = max(app_times)
         return t_end - t_start
 
     except subprocess.TimeoutExpired:
@@ -343,25 +366,29 @@ def run_single_handshake(
     ).encode()
 
     cmd = [
-        "openssl", "s_client",
-        "-connect",  f"{server_host}:{server_port}",
-        "-CAfile",   sc["ca_cert"],
+        "openssl",
+        "s_client",
+        "-connect",
+        f"{server_host}:{server_port}",
+        "-CAfile",
+        sc["ca_cert"],
         # [W5] Nonaktifkan TLS session tickets untuk mencegah session resumption
         "-no_ticket",
         # Signature algorithm yang diharapkan dari server
-        "-sigalgs",  sc["sigalgs"],
+        # "-sigalgs",  sc["sigalgs"], # Dinonaktifkan karena bug OpenSSL 3.0.x dengan oqs-provider
         # KEM groups — konstan di semua skenario
-        "-groups",   KEM_GROUPS,
+        "-groups",
+        KEM_GROUPS,
         # Gagal jika verifikasi sertifikat tidak berhasil
         "-verify_return_error",
         # Jangan tutup koneksi saat stdin EOF sebelum server merespons
         "-ign_eof",
     ]
 
-    handshake_time: Optional[float]  = None
-    ttfb:           Optional[float]  = None
-    handshake_done  = threading.Event()
-    stderr_lines:   list[str]        = []
+    handshake_time: Optional[float] = None
+    ttfb: Optional[float] = None
+    handshake_done = threading.Event()
+    stderr_lines: list[str] = []
 
     t_start = time.perf_counter()
 
@@ -434,10 +461,10 @@ def run_single_handshake(
 
     return {
         "handshake_time_s": handshake_time,
-        "ttfb_s":           ttfb,
-        "cpu_peak_pct":     monitor.cpu_peak,
-        "cpu_mean_pct":     monitor.cpu_mean,
-        "ram_peak_bytes":   monitor.ram_peak_bytes,
+        "ttfb_s": ttfb,
+        "cpu_peak_pct": monitor.cpu_peak,
+        "cpu_mean_pct": monitor.cpu_mean,
+        "ram_peak_bytes": monitor.ram_peak_bytes,
     }
 
 
@@ -445,9 +472,9 @@ def run_single_handshake(
 # Eksekusi satu skenario + kondisi jaringan
 # ─────────────────────────────────────────────────────────────────────────────
 def run_scenario(
-    scenario_id:       str,
+    scenario_id: str,
     network_condition: str,
-    output_dir:        Path,
+    output_dir: Path,
 ) -> list[dict]:
     """
     Menjalankan 20 warmup + 100 iterasi pengukuran untuk satu kombinasi
@@ -455,15 +482,17 @@ def run_scenario(
 
     Setiap iterasi menggunakan tshark untuk merekam PCAP guna perhitungan TTLB.
     """
-    scenario  = SCENARIOS[scenario_id]
-    port      = PORT_SCENARIO[scenario_id]
+    scenario = SCENARIOS[scenario_id]
+    port = PORT_SCENARIO[scenario_id]
     net_params = NETWORK_CONDITIONS[network_condition]
 
     sep = "─" * 62
     logger.info(f"\n{sep}")
     logger.info(f"  Skenario {scenario_id}: {scenario['name']}")
     logger.info(f"  Jaringan : {net_params['description']}")
-    logger.info(f"  Port     : {port}  |  Warmup: {WARMUP_ITERATIONS}  |  Iterasi: {MEASUREMENT_ITERATIONS}")
+    logger.info(
+        f"  Port     : {port}  |  Warmup: {WARMUP_ITERATIONS}  |  Iterasi: {MEASUREMENT_ITERATIONS}"
+    )
     logger.info(sep)
 
     # Konfigurasi netem
@@ -480,7 +509,11 @@ def run_scenario(
 
     for idx in range(total):
         is_warmup = idx < WARMUP_ITERATIONS
-        label = f"warmup-{idx+1:02d}" if is_warmup else f"data-{idx-WARMUP_ITERATIONS+1:03d}"
+        label = (
+            f"warmup-{idx + 1:02d}"
+            if is_warmup
+            else f"data-{idx - WARMUP_ITERATIONS + 1:03d}"
+        )
 
         pcap_path = str(pcap_dir / f"{label}.pcap")
         tshark_proc = start_tshark(port, pcap_path)
@@ -493,17 +526,17 @@ def run_scenario(
             time.sleep(0.15)  # Tunggu tshark flush ke disk
             ttlb = parse_ttlb_from_pcap(pcap_path, port)
 
-            metrics["ttlb_s"]      = ttlb
-            metrics["scenario"]    = scenario_id
-            metrics["network"]     = network_condition
-            metrics["is_warmup"]   = is_warmup
-            metrics["iteration"]   = label
-            metrics["timestamp"]   = datetime.utcnow().isoformat()
+            metrics["ttlb_s"] = ttlb
+            metrics["scenario"] = scenario_id
+            metrics["network"] = network_condition
+            metrics["is_warmup"] = is_warmup
+            metrics["iteration"] = label
+            metrics["timestamp"] = datetime.utcnow().isoformat()
 
             if not is_warmup:
                 results.append(metrics)
 
-                hs_ms   = (metrics["handshake_time_s"] or 0) * 1000
+                hs_ms = (metrics["handshake_time_s"] or 0) * 1000
                 ttfb_ms = (metrics["ttfb_s"] or 0) * 1000
                 ttlb_ms = (ttlb or 0) * 1000
                 logger.info(
@@ -512,7 +545,7 @@ def run_scenario(
                     f"TTFB={ttfb_ms:7.2f}ms  "
                     f"TTLB={ttlb_ms:7.2f}ms  "
                     f"CPU_peak={metrics['cpu_peak_pct']:5.1f}%  "
-                    f"RAM={metrics['ram_peak_bytes']//1024}KB"
+                    f"RAM={metrics['ram_peak_bytes'] // 1024}KB"
                 )
             else:
                 logger.debug(f"[{label}] warmup selesai")
@@ -523,8 +556,7 @@ def run_scenario(
             logger.warning(f"[{label}] GAGAL ({failures}/{MAX_FAILURES}): {exc}")
             if failures >= MAX_FAILURES:
                 raise RuntimeError(
-                    f"Terlalu banyak kegagalan ({failures}). "
-                    f"Periksa koneksi ke server."
+                    f"Terlalu banyak kegagalan ({failures}). Periksa koneksi ke server."
                 )
 
         finally:
@@ -567,23 +599,33 @@ def main():
         description="PQC TLS 1.3 Benchmark — Thesis Edge Computing"
     )
     parser.add_argument(
-        "--scenarios", nargs="+", choices=["A", "B", "C"], default=["A", "B", "C"],
+        "--scenarios",
+        nargs="+",
+        choices=["A", "B", "C"],
+        default=["A", "B", "C"],
         help="Skenario yang dijalankan (default: semua)",
     )
     parser.add_argument(
-        "--networks", nargs="+", choices=["ideal", "edge"], default=["ideal", "edge"],
+        "--networks",
+        nargs="+",
+        choices=["ideal", "edge"],
+        default=["ideal", "edge"],
         help="Kondisi jaringan (default: semua)",
     )
     parser.add_argument(
-        "--output-dir", type=Path, default=Path("/results"),
+        "--output-dir",
+        type=Path,
+        default=Path("/results"),
         help="Direktori output CSV dan JSON",
     )
     parser.add_argument(
-        "--skip-spawn-overhead", action="store_true",
+        "--skip-spawn-overhead",
+        action="store_true",
         help="Lewati pengukuran spawn overhead [W1]",
     )
     parser.add_argument(
-        "--run-analysis", action="store_true",
+        "--run-analysis",
+        action="store_true",
         help="Jalankan analysis.py secara otomatis setelah benchmark selesai",
     )
     args = parser.parse_args()
@@ -591,14 +633,14 @@ def main():
     args.output_dir.mkdir(parents=True, exist_ok=True)
 
     run_id = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-    logger.info(f"{'='*62}")
+    logger.info(f"{'=' * 62}")
     logger.info(f"  PQC TLS 1.3 Benchmark  |  Run ID: {run_id}")
     logger.info(f"  Skenario : {args.scenarios}")
     logger.info(f"  Jaringan : {args.networks}")
     logger.info(f"  Output   : {args.output_dir}")
     logger.info(f"  Warmup   : {WARMUP_ITERATIONS} iterasi [W3]")
     logger.info(f"  Payload  : {PAYLOAD_SIZE_KB}KB [W4]")
-    logger.info(f"{'='*62}\n")
+    logger.info(f"{'=' * 62}\n")
 
     # ── [W1] Ukur spawn overhead ──────────────────────────────────────────
     if not args.skip_spawn_overhead:
@@ -638,18 +680,23 @@ def main():
     except OSError:
         pass
 
-    logger.info(f"\n{'='*62}")
+    logger.info(f"\n{'=' * 62}")
     logger.info(f"  Benchmark selesai. Total baris: {len(all_results)}")
     logger.info(f"  File utama: {combined_path}")
-    logger.info(f"{'='*62}\n")
+    logger.info(f"{'=' * 62}\n")
 
     # ── [W6] Jalankan analisis statistik ─────────────────────────────────
     if args.run_analysis:
         logger.info("Menjalankan statistical analysis...")
         subprocess.run(
-            ["python3", "/benchmark/analysis.py",
-             "--results-file", str(combined_path),
-             "--output-dir", str(args.output_dir)],
+            [
+                "python3",
+                "/benchmark/analysis.py",
+                "--results-file",
+                str(combined_path),
+                "--output-dir",
+                str(args.output_dir),
+            ],
             check=False,
         )
 
