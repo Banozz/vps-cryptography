@@ -13,13 +13,12 @@ providers = provider_sect
 
 [provider_sect]
 default   = default_sect
-oqs       = oqs_sect
+oqsprovider = oqsprovider_sect
 
 [default_sect]
 activate = 1
 
-[oqs_sect]
-module   = /usr/lib/x86_64-linux-gnu/ossl-modules/oqsprovider.so
+[oqsprovider_sect]
 activate = 1
 
 # ── CA defaults (used during cert generation) ─────────────────────────────────

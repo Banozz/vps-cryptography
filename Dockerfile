@@ -53,13 +53,10 @@ RUN git clone --depth 1 --branch ${OQS_PROVIDER_VERSION} \
     && cmake -S oqs-provider -B oqs-provider/build \
         -GNinja \
         -DCMAKE_BUILD_TYPE=Release \
-        -DCMAKE_INSTALL_PREFIX=/usr/local \
-        -Dliboqs_DIR=/usr/local/lib/cmake/liboqs \
+        -DOPENSSL_ROOT_DIR=/usr \
+        -DCMAKE_PREFIX_PATH=/usr/local \
     && ninja -C oqs-provider/build \
-    && ninja -C oqs-provider/build install \
-    && mkdir -p /usr/lib/x86_64-linux-gnu/ossl-modules \
-    && find /usr -name "oqsprovider.so" \
-         -exec cp {} /usr/lib/x86_64-linux-gnu/ossl-modules/ \;
+    && ninja -C oqs-provider/build install
 
 # Bersihkan source build
 RUN rm -rf /tmp/liboqs /tmp/oqs-provider
