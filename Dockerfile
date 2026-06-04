@@ -43,7 +43,7 @@ RUN git clone --depth 1 --branch ${LIBOQS_VERSION} \
     && echo '/usr/local/lib' > /etc/ld.so.conf.d/liboqs.conf \
     && ldconfig
 
-# Build oqs-provider + Menyisipkan Trik Symlink oqs.so untuk OpenSSL Klien
+# Build oqs-provider
 RUN git clone --depth 1 --branch ${OQS_PROVIDER_VERSION} \
         https://github.com/open-quantum-safe/oqs-provider.git oqs-provider \
     && cmake -S oqs-provider -B oqs-provider/build \
@@ -53,10 +53,6 @@ RUN git clone --depth 1 --branch ${OQS_PROVIDER_VERSION} \
         -DCMAKE_PREFIX_PATH=/usr/local \
     && ninja -C oqs-provider/build \
     && ninja -C oqs-provider/build install \
-    && mkdir -p /usr/lib/x86_64-linux-gnu/ossl-modules \
-    && OQS_PATH=$(find /usr -name "oqsprovider.so" | head -n 1) \
-    && ln -s $OQS_PATH $(dirname $OQS_PATH)/oqs.so \
-    && ln -s $OQS_PATH /usr/lib/x86_64-linux-gnu/ossl-modules/oqs.so 2>/dev/null || true
 
 # Bersihkan direktori temporary build
 RUN rm -rf /tmp/liboqs /tmp/oqs-provider
@@ -78,7 +74,7 @@ RUN openssl list -providers | grep -q "oqsprovider" \
     || (echo "✗ oqs-provider NOT found" && exit 1)
 
 # Validasi kesiapan algoritma hibrida/kuantum di sisi Klien
-RUN openssl list -signature-algorithms -provider oqs -provider default \
+RUN openssl list -signature-algorithms -provider oqsprovider -provider default \
     | grep -q "p256_dilithium2" \
     && echo "✓ p256_dilithium2 available for benchmarking" \
     || (echo "✗ p256_dilithium2 NOT found" && exit 1)
