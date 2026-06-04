@@ -21,6 +21,7 @@ RUN apt-get update && apt-get install -y \
         tcpdump \
         procps \
         net-tools \
+        pkg-config \
     && rm -rf /var/lib/apt/lists/*
 
 ARG LIBOQS_VERSION=0.11.0
@@ -49,10 +50,11 @@ RUN git clone --depth 1 --branch ${OQS_PROVIDER_VERSION} \
     && cmake -S oqs-provider -B oqs-provider/build \
         -GNinja \
         -DCMAKE_BUILD_TYPE=Release \
-        -DOPENSSL_ROOT_DIR=/usr \
-        -DCMAKE_PREFIX_PATH=/usr/local \
+        -Dliboqs_DIR=/usr/local/lib/cmake/liboqs \
     && ninja -C oqs-provider/build \
-    && ninja -C oqs-provider/build install
+    && ninja -C oqs-provider/build install \
+    && mkdir -p /usr/lib/x86_64-linux-gnu/ossl-modules \
+    && find /usr/local -name "oqsprovider.so" -exec cp {} /usr/lib/x86_64-linux-gnu/ossl-modules/ \;
 
 # Bersihkan direktori temporary build
 RUN rm -rf /tmp/liboqs /tmp/oqs-provider
