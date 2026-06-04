@@ -77,7 +77,8 @@ RUN openssl list -providers | grep -q "oqsprovider" \
     && echo "✓ oqs-provider loaded" \
     || (echo "✗ oqs-provider NOT found — build failed" && exit 1)
 
-RUN openssl list -signature-algorithms -provider oqs -provider default \
+# Validasi algoritma signature
+RUN openssl list -signature-algorithms -provider oqsprovider -provider default \
     | grep -q "p256_dilithium2" \
     && echo "✓ p256_dilithium2 available" \
     || (echo "✗ p256_dilithium2 NOT found" && exit 1)
