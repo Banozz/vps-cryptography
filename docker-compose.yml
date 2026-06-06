@@ -33,8 +33,8 @@ services:
       # WAJIB di-export di host Fedora sebelum running: export SERVER_HOST=<IP_WINDOWS_FISIK>
       - SERVER_HOST=${SERVER_HOST:?Set SERVER_HOST=192.168.100.23}
 
-      # Nama interface fisik kartu jaringan laptop Fedora (misal: enp2s0, wlan0)
-      - CAPTURE_IFACE=${CAPTURE_IFACE:-eth0}
+      # Nama interface fisik kartu jaringan laptop Fedora (misal: enp2s0, wlp2s0)
+      - CAPTURE_IFACE=${CAPTURE_IFACE:-wlp2s0}
 
       - PAYLOAD_SIZE_KB=${PAYLOAD_SIZE_KB:-10}
       - WARMUP_ITERS=${WARMUP_ITERS:-20}
@@ -46,7 +46,7 @@ services:
       - NETWORKS=${NETWORKS:-ideal,edge}
 
     # Menjalankan script orkestrasi yang memanggil benchmark.py
-    command: bash /measurement/scripts/run_experiment.sh
+    command: bash /measurement/scripts/run_experiments.sh
 
     restart: "no"
 

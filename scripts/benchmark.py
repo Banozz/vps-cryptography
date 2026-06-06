@@ -691,7 +691,7 @@ def main():
         subprocess.run(
             [
                 "python3",
-                "/benchmark/analysis.py",
+                "/measurement/scripts/analysis.py",
                 "--results-file",
                 str(combined_path),
                 "--output-dir",
