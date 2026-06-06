@@ -363,6 +363,10 @@ def run_single_handshake(
     cmd = [
         "openssl",
         "s_client",
+        "-provider",
+        "oqsprovider",
+        "-provider",
+        "default",
         "-connect",
         f"{server_host}:{server_port}",
         "-CAfile",
