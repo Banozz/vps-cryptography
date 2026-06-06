@@ -18,6 +18,7 @@ RUN dnf install -y \
         python3 python3-pip \
         wireshark-cli \
         iproute \
+        iproute-tc \
         socat \
         tcpdump \
         procps-ng \
