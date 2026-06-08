@@ -211,6 +211,13 @@ def stop_tshark(proc: subprocess.Popen):
 # ─────────────────────────────────────────────────────────────────────────────
 def parse_ttlb_from_pcap(pcap_path: str, server_port: int) -> Optional[float]:
     try:
+        # Periksa ukuran pcap
+        pcap_size = os.path.getsize(pcap_path)
+        if pcap_size < 1000:
+            logger.warning(
+                f"PCAP {pcap_path} sangat kecil ({pcap_size} bytes), mungkin gagal rekam."
+            )
+
         # PENCARIAN CLIENT HELLO (Gunakan tls.handshake.type)
         ch_res = subprocess.run(
             [
@@ -248,11 +255,21 @@ def parse_ttlb_from_pcap(pcap_path: str, server_port: int) -> Optional[float]:
         ch_t = [float(t) for t in ch_res.stdout.strip().split() if t]
         app_t = [float(t) for t in app_res.stdout.strip().split() if t]
 
-        if not ch_t or not app_t:
+        if not ch_t:
+            logger.warning(
+                f"PCAP parse: ClientHello tidak ditemukan. stdout: '{ch_res.stdout}' stderr: '{ch_res.stderr}'"
+            )
+            return None
+
+        if not app_t:
+            logger.warning(
+                f"PCAP parse: Application Data tidak ditemukan. stdout: '{app_res.stdout}' stderr: '{app_res.stderr}'"
+            )
             return None
 
         return max(app_t) - ch_t[0]
-    except Exception:
+    except Exception as e:
+        logger.error(f"PCAP exception: {e}")
         return None
 
 
