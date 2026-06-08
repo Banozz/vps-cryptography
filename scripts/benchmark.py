@@ -250,10 +250,7 @@ def parse_ttlb_from_pcap(pcap_path: str, server_port: int) -> Optional[float]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Satu iterasi handshake (DIREVISI TOTAL UNTUK DEADLOCK)
-# ─────────────────────────────────────────────────────────────────────────────
-# ─────────────────────────────────────────────────────────────────────────────
-# Satu iterasi handshake (DIREVISI TOTAL UNTUK DEADLOCK)
+# Satu iterasi handshake (DIREVISI TOTAL UNTUK I/O PIPELINE & ERROR LOGGING)
 # ─────────────────────────────────────────────────────────────────────────────
 def run_single_handshake(scenario_id: str, server_host: str, server_port: int) -> dict:
     sc = SCENARIOS[scenario_id]
@@ -270,15 +267,15 @@ def run_single_handshake(scenario_id: str, server_host: str, server_port: int) -
         f"{server_host}:{server_port}",
         "-CAfile",
         sc["ca_cert"],
+        "-tls1_3",
         "-no_ticket",
         "-groups",
         KEM_GROUPS,
         "-verify_return_error",
         "-ign_eof",
-        "-brief",  # <- Tambahkan brief untuk output bersih
+        "-brief",
     ]
 
-    t_start = time.perf_counter()
     proc = subprocess.Popen(
         cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
     )
@@ -286,36 +283,37 @@ def run_single_handshake(scenario_id: str, server_host: str, server_port: int) -
     monitor = ResourceMonitor(proc.pid)
     monitor.start()
 
-    # Kirim request segera setelah proses dimulai
+    stdout_data = b""
     try:
-        if proc.stdin:
+        # Tulis input secara aman (Cegah ValueError: flush of closed file)
+        if proc.poll() is None:
             proc.stdin.write(get_request)
-            try:
-                proc.stdin.flush()
-            except (BrokenPipeError, ValueError):
-                pass  # Abaikan jika stdin sudah ditutup duluan
-            try:
-                proc.stdin.close()
-            except (BrokenPipeError, ValueError):
-                pass  # Abaikan jika stdin sudah ditutup duluan
-    except Exception as e:
-        monitor.stop()
-        proc.kill()
-        raise e
+            proc.stdin.flush()
+        proc.stdin.close()
 
-    # Baca seluruh output sampai selesai untuk menghindari buffer penuh
-    try:
-        stdout_data, _ = proc.communicate(timeout=30)
+        stdout_data = proc.stdout.read()
+        proc.wait(timeout=30)
+    except (BrokenPipeError, ValueError):
+        # Jika OpenSSL mati seketika, tutup pipe dan baca errornya
+        proc.stdin.close()
+        stdout_data = proc.stdout.read()
+        proc.wait()
     except subprocess.TimeoutExpired:
         monitor.stop()
         proc.kill()
         raise TimeoutError(f"OpenSSL timeout (Port {server_port})")
+    except Exception as e:
+        monitor.stop()
+        proc.kill()
+        raise e
+    finally:
+        monitor.stop()
 
-    t_end = time.perf_counter()
-    monitor.stop()
-
+    # Tangkap dan log output asli dari OpenSSL jika terjadi error
     if proc.returncode != 0:
-        logger.warning(f"OpenSSL exit {proc.returncode}. Output: {stdout_data[:200]}")
+        error_msg = stdout_data.decode(errors="ignore").strip()
+        logger.error(f"OpenSSL Error (Code {proc.returncode}): {error_msg[:300]}")
+        raise RuntimeError(f"Handshake dibatalkan oleh OpenSSL")
 
     return {
         "handshake_time_s": None,
