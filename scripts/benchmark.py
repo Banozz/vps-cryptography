@@ -186,7 +186,9 @@ def start_tshark(port: int, pcap_path: str) -> subprocess.Popen:
     cmd = [
         "tshark",
         "-i",
-        CAPTURE_INTERFACE,
+        "any",
+        "-p",
+        f"{port}",
         "-f",
         f"tcp port {port}",
         "-w",
