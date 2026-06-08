@@ -35,7 +35,8 @@ MEASUREMENT_ITERATIONS = int(os.environ.get("MEASURE_ITERS", "100"))
 SPAWN_OVERHEAD_ITERATIONS = 50
 
 PAYLOAD_SIZE_KB = int(os.environ.get("PAYLOAD_SIZE_KB", "10"))
-PAYLOAD_FILENAME = f"payload_{PAYLOAD_SIZE_KB}kb.bin"
+# PAYLOAD_FILENAME = f"payload_{PAYLOAD_SIZE_KB}kb.bin"
+PAYLOAD_FILENAME = "payload.bin"
 
 SERVER_HOST = os.environ.get("SERVER_HOST", "pqc-server")
 PORT_SCENARIO = {
@@ -396,7 +397,10 @@ def run_scenario(
                     f"[{label}] TTLB={ttlb * 1000:7.2f}ms CPU={metrics['cpu_peak_pct']:5.1f}% RAM={metrics['ram_peak_bytes'] // 1024}KB"
                 )
         except Exception as exc:
+            import traceback
+
             logger.error(f"[{label}] Gagal: {exc}")
+            logger.error(traceback.format_exc())
             stop_tshark(tshark_proc)
     return results
 
