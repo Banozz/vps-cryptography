@@ -206,15 +206,19 @@ def stop_tshark(proc: subprocess.Popen):
         proc.wait()
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# tshark Parser (DIREVISI UNTUK WIRESHARK 4.x)
+# ─────────────────────────────────────────────────────────────────────────────
 def parse_ttlb_from_pcap(pcap_path: str, server_port: int) -> Optional[float]:
     try:
+        # PENCARIAN CLIENT HELLO (Gunakan tls.handshake.type)
         ch_res = subprocess.run(
             [
                 "tshark",
                 "-r",
                 pcap_path,
                 "-Y",
-                f"ssl.handshake.type == 1 and tcp.dstport == {server_port}",
+                f"tls.handshake.type == 1 and tcp.dstport == {server_port}",
                 "-T",
                 "fields",
                 "-e",
@@ -224,6 +228,7 @@ def parse_ttlb_from_pcap(pcap_path: str, server_port: int) -> Optional[float]:
             text=True,
             timeout=15,
         )
+        # PENCARIAN APPLICATION DATA
         app_res = subprocess.run(
             [
                 "tshark",
@@ -242,8 +247,10 @@ def parse_ttlb_from_pcap(pcap_path: str, server_port: int) -> Optional[float]:
         )
         ch_t = [float(t) for t in ch_res.stdout.strip().split() if t]
         app_t = [float(t) for t in app_res.stdout.strip().split() if t]
+
         if not ch_t or not app_t:
             return None
+
         return max(app_t) - ch_t[0]
     except Exception:
         return None
