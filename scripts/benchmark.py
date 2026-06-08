@@ -377,7 +377,7 @@ def run_scenario(
         try:
             metrics = run_single_handshake(scenario_id, SERVER_HOST, port)
             stop_tshark(tshark_proc)
-            time.sleep(0.15)
+            time.sleep(0.5)
 
             ttlb = parse_ttlb_from_pcap(pcap_path, port)
             if not ttlb:
