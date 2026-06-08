@@ -194,7 +194,7 @@ def start_tshark(port: int, pcap_path: str) -> subprocess.Popen:
         "-q",
     ]
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    time.sleep(2.0)
+    time.sleep(1.0)
     return proc
 
 
@@ -377,9 +377,6 @@ def run_scenario(
         tshark_proc = start_tshark(port, pcap_path)
         try:
             metrics = run_single_handshake(scenario_id, SERVER_HOST, port)
-
-            time.sleep(1.0)
-
             stop_tshark(tshark_proc)
             time.sleep(0.5)
 
