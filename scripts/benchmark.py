@@ -252,6 +252,9 @@ def parse_ttlb_from_pcap(pcap_path: str, server_port: int) -> Optional[float]:
 # ─────────────────────────────────────────────────────────────────────────────
 # Satu iterasi handshake (DIREVISI TOTAL UNTUK DEADLOCK)
 # ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# Satu iterasi handshake (DIREVISI TOTAL UNTUK DEADLOCK)
+# ─────────────────────────────────────────────────────────────────────────────
 def run_single_handshake(scenario_id: str, server_host: str, server_port: int) -> dict:
     sc = SCENARIOS[scenario_id]
     get_request = f"GET /{PAYLOAD_FILENAME} HTTP/1.0\r\nHost: {server_host}\r\nConnection: close\r\n\r\n".encode()
@@ -283,11 +286,18 @@ def run_single_handshake(scenario_id: str, server_host: str, server_port: int) -
     monitor = ResourceMonitor(proc.pid)
     monitor.start()
 
-    # Kirim request segera setelah proses dimulai (Nginx akan menunggu TLS selesai)
+    # Kirim request segera setelah proses dimulai
     try:
-        proc.stdin.write(get_request)
-        proc.stdin.flush()
-        proc.stdin.close()
+        if proc.stdin:
+            proc.stdin.write(get_request)
+            try:
+                proc.stdin.flush()
+            except (BrokenPipeError, ValueError):
+                pass  # Abaikan jika stdin sudah ditutup duluan
+            try:
+                proc.stdin.close()
+            except (BrokenPipeError, ValueError):
+                pass  # Abaikan jika stdin sudah ditutup duluan
     except Exception as e:
         monitor.stop()
         proc.kill()
@@ -295,7 +305,7 @@ def run_single_handshake(scenario_id: str, server_host: str, server_port: int) -
 
     # Baca seluruh output sampai selesai untuk menghindari buffer penuh
     try:
-        stdout_data, _ = proc.communicate(timeout=60)
+        stdout_data, _ = proc.communicate(timeout=30)
     except subprocess.TimeoutExpired:
         monitor.stop()
         proc.kill()
@@ -307,13 +317,9 @@ def run_single_handshake(scenario_id: str, server_host: str, server_port: int) -
     if proc.returncode != 0:
         logger.warning(f"OpenSSL exit {proc.returncode}. Output: {stdout_data[:200]}")
 
-    # Kita menggunakan tshark untuk TTLB yang sangat akurat.
-    # Handshake time murni dari OpenSSL tidak lagi kita parsing dari teks untuk menghindari error.
-    # Kita asumsikan total durasi openssl s_client sebagai pendekatan kasar (akan ditimpa/diperkaya oleh PCAP)
-
     return {
-        "handshake_time_s": None,  # PCAP lebih bisa diandalkan, kita kosongkan atau bisa diisi estimasi kasar
-        "ttfb_s": None,  # Tidak lagi akurat di level Python, kita andalkan tshark untuk TTLB
+        "handshake_time_s": None,
+        "ttfb_s": None,
         "cpu_peak_pct": monitor.cpu_peak,
         "cpu_mean_pct": monitor.cpu_mean,
         "ram_peak_bytes": monitor.ram_peak_bytes,
