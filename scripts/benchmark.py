@@ -185,18 +185,13 @@ class ResourceMonitor:
 def start_tshark(port: int, pcap_path: str) -> subprocess.Popen:
     cmd = [
         "tshark",
-        "-i",
-        "any",
-        "-p",
-        f"{port}",
-        "-f",
-        f"tcp port {port}",
-        "-w",
-        pcap_path,
+        "-i", CAPTURE_INTERFACE,
+        "-f", f"tcp port {port}",
+        "-w", pcap_path,
         "-q",
     ]
-    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    time.sleep(2.0)
+    proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    time.sleep(1.0)
     return proc
 
 
