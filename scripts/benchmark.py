@@ -240,7 +240,7 @@ def parse_ttlb_from_pcap(pcap_path: str, server_port: int) -> Optional[float]:
                 "-r",
                 pcap_path,
                 "-Y",
-                f"tls.record.content_type == 23 and tcp.srcport == {server_port}",
+                f"tls.app_data and tcp.srcport == {server_port}",
                 "-T",
                 "fields",
                 "-e",
