@@ -24,6 +24,7 @@ RUN dnf install -y \
         procps-ng \
         net-tools \
         pkg-config \
+        time \
     && dnf clean all
 
 ARG LIBOQS_VERSION=0.11.0
