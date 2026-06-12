@@ -3,12 +3,22 @@
 benchmark.py — PQC TLS 1.3 Performance Benchmark
 Thesis: Evaluasi Performa Hybrid Signature Pasca-Kuantum pada TLS 1.3 di Edge Computing
 
-Metrik yang diukur (semua dari PCAP, referensi waktu seragam):
-  - Handshake Time : ClientHello[0] → Finished dari server
-  - TTFB           : ClientHello[0] → Application Data pertama dari server
-  - TTLB           : ClientHello[0] → Application Data terakhir dari server (eksklusi close_notify)
-  - CPU peak/mean  : psutil polling (10ms) + /usr/bin/time -v untuk validasi
-  - RAM peak       : psutil RSS peak
+Metrik yang diukur:
+  Waktu (semua dari PCAP, referensi t=0 = ClientHello pertama):
+    - TTFB  : ClientHello[0] → Application Data pertama dari server
+    - TTLB  : ClientHello[0] → Application Data terakhir dari server
+              (close_notify dikecualikan via CLOSE_NOTIFY_MAX_FRAME_LEN)
+
+  Resource (dari /usr/bin/time -v):
+    - cpu_usr_s    : CPU user time (seconds)
+    - cpu_sys_s    : CPU system time (seconds)
+    - cpu_pct_time : Persentase CPU yang digunakan (string, mis. "52%")
+    - max_rss_kb   : Peak RAM usage (KB)
+
+  Catatan: psutil dihapus karena cpu_percent(interval=None) selalu mengembalikan
+  0.0 di environment container ini (kernel tidak mengupdate /proc/<pid>/stat
+  untuk child processes secara real-time). /usr/bin/time -v menggunakan wait4()
+  syscall yang lebih akurat dan tidak bergantung pada polling.
 """
 
 import argparse
@@ -19,13 +29,10 @@ import os
 import re
 import shutil
 import subprocess
-import threading
 import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Optional
-
-import psutil
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Konfigurasi global
@@ -53,8 +60,7 @@ PORT_SCENARIO = {
 
 CAPTURE_INTERFACE = os.environ.get("CAPTURE_IFACE", "eth0")
 CERTS_DIR         = Path(os.environ.get("CERTS_DIR", "/measurement/certs"))
-CPU_POLL_INTERVAL_S = 0.010   # 10ms polling psutil
-KEM_GROUPS          = "kyber768:P-256:X25519"
+KEM_GROUPS        = "kyber768:P-256:X25519"
 
 # Ukuran minimum PCAP yang dianggap valid (bytes)
 # 384 = PCAP global header kosong di environment ini
@@ -126,64 +132,6 @@ def configure_netem(condition: str, interface: str = CAPTURE_INTERFACE):
             f"[netem] Diterapkan: delay={params['delay_ms']}ms "
             f"loss={params['loss_pct']}% pada {interface}"
         )
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# CPU & RAM Monitor (psutil, real-time)
-# ─────────────────────────────────────────────────────────────────────────────
-class ResourceMonitor:
-    """
-    Melakukan polling psutil setiap CPU_POLL_INTERVAL_S terhadap proses target.
-    Digunakan bersamaan dengan /usr/bin/time -v untuk validasi.
-
-    Catatan limitasi (dicatat di Bab 3 thesis):
-      - cpu_percent(interval=None) mengukur delta sejak panggilan terakhir.
-        Nilai bisa tinggi (90%+) pada burst awal handshake atau nol jika
-        proses sudah exit sebelum polling berikutnya.
-      - Untuk kesimpulan kuantitatif, gunakan kolom cpu_usr_s dan cpu_sys_s
-        dari /usr/bin/time -v (lihat fungsi run_single_handshake).
-    """
-
-    def __init__(self, pid: int, interval: float = CPU_POLL_INTERVAL_S):
-        self.pid      = pid
-        self.interval = interval
-        self.cpu_pct:   list[float] = []
-        self.rss_bytes: list[int]   = []
-        self._stop   = threading.Event()
-        self._thread = threading.Thread(target=self._run, daemon=True)
-
-    def start(self):
-        self._thread.start()
-
-    def stop(self):
-        self._stop.set()
-        self._thread.join(timeout=3)
-
-    def _run(self):
-        try:
-            proc = psutil.Process(self.pid)
-            proc.cpu_percent(interval=None)   # buang sampel pertama (selalu 0)
-            while not self._stop.is_set():
-                try:
-                    self.cpu_pct.append(proc.cpu_percent(interval=None))
-                    self.rss_bytes.append(proc.memory_info().rss)
-                except psutil.NoSuchProcess:
-                    break
-                time.sleep(self.interval)
-        except Exception:
-            pass
-
-    @property
-    def cpu_peak(self) -> float:
-        return max(self.cpu_pct, default=0.0)
-
-    @property
-    def cpu_mean(self) -> float:
-        return sum(self.cpu_pct) / len(self.cpu_pct) if self.cpu_pct else 0.0
-
-    @property
-    def ram_peak_bytes(self) -> int:
-        return max(self.rss_bytes, default=0)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -262,16 +210,12 @@ def parse_metrics_from_pcap(
     server_port: int,
 ) -> Optional[dict]:
     """
-    Parsing tiga metrik waktu dari PCAP menggunakan referensi waktu yang seragam.
+    Parsing dua metrik waktu dari PCAP menggunakan referensi waktu yang seragam.
 
     Referensi t=0: frame.time_epoch dari ClientHello PERTAMA (min dari semua
     ClientHello yang ditemukan di port tujuan). Menggunakan min() menangani
     Hello Retry Request dengan benar — HRR menyebabkan dua ClientHello,
     dan kita ingin mengukur dari inisiasi koneksi pertama.
-
-    Handshake Time:
-        t=0 → timestamp paket TLS Finished dari server (handshake.type == 20).
-        Diambil nilai PERTAMA (min) karena Finished hanya dikirim sekali oleh server.
 
     TTFB (Time-To-First-Byte):
         t=0 → timestamp Application Data PERTAMA dari server.
@@ -279,10 +223,10 @@ def parse_metrics_from_pcap(
         Dikecualikan paket dengan frame.len <= CLOSE_NOTIFY_MAX_FRAME_LEN.
 
     TTLB (Time-To-Last-Byte):
-        t=0 → timestamp Application Data TERAKHIR dari server sebelum FIN/close_notify.
+        t=0 → timestamp Application Data TERAKHIR dari server sebelum close_notify.
         Filter sama dengan TTFB, diambil nilai max dari timestamps yang tersaring.
 
-    Return dict dengan kunci handshake_time_s, ttfb_s, ttlb_s, atau None jika gagal.
+    Return dict dengan kunci ttfb_s dan ttlb_s, atau None jika gagal.
     """
     try:
         pcap_size = os.path.getsize(pcap_path)
@@ -303,30 +247,6 @@ def parse_metrics_from_pcap(
             logger.warning("PCAP parse: ClientHello tidak ditemukan.")
             return None
         t_ref = min(ch_times)   # t=0, pakai ClientHello pertama (handle HRR)
-
-        # ── Finished dari server ─────────────────────────────────────────────
-        # handshake.type == 20 adalah Finished
-        # Finished dikirim server dari srcport == server_port
-        fin_rows = _tshark_query(
-            pcap_path,
-            f"tls.handshake.type == 20 and tcp.srcport == {server_port}",
-            ["frame.time_epoch"],
-        )
-        fin_times = [float(r[0]) for r in fin_rows if r and r[0].strip()]
-
-        if not fin_times:
-            # Fallback: Finished kadang ada di dalam record yang sama dengan
-            # ServerHello / EncryptedExtensions di TLS 1.3. Coba filter lebih luas.
-            fin_rows = _tshark_query(
-                pcap_path,
-                f"tls.handshake.type == 20",
-                ["frame.time_epoch"],
-            )
-            fin_times = [float(r[0]) for r in fin_rows if r and r[0].strip()]
-
-        handshake_time_s = (min(fin_times) - t_ref) if fin_times else None
-        if handshake_time_s is None:
-            logger.warning("PCAP parse: pesan Finished tidak ditemukan, Handshake Time tidak tersedia.")
 
         # ── Application Data dari server (TTFB & TTLB) ───────────────────────
         # tls.app_data = filter tshark untuk Application Data record (konten terenkripsi)
@@ -358,9 +278,8 @@ def parse_metrics_from_pcap(
         ttlb_s = max(app_payload_times) - t_ref
 
         return {
-            "handshake_time_s": handshake_time_s,
-            "ttfb_s":           ttfb_s,
-            "ttlb_s":           ttlb_s,
+            "ttfb_s": ttfb_s,
+            "ttlb_s": ttlb_s,
         }
 
     except subprocess.TimeoutExpired:
@@ -406,16 +325,17 @@ def _parse_usr_time_output(stderr_text: str) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 # Satu iterasi handshake
 # ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# Satu iterasi handshake
+# ─────────────────────────────────────────────────────────────────────────────
 def run_single_handshake(scenario_id: str, server_host: str, server_port: int) -> dict:
     """
-    Menjalankan satu iterasi openssl s_client dan mengumpulkan:
-      - cpu_peak_pct, cpu_mean_pct, ram_peak_bytes  : dari psutil (real-time)
-      - cpu_usr_s, cpu_sys_s, cpu_pct_time          : dari /usr/bin/time -v (validasi)
-      - max_rss_kb                                  : dari /usr/bin/time -v
+    Menjalankan satu iterasi openssl s_client dan mengumpulkan resource metrics
+    via /usr/bin/time -v.
 
-    Metrik waktu (handshake_time_s, ttfb_s, ttlb_s) TIDAK dihitung di sini —
-    semuanya dihitung dari PCAP oleh parse_metrics_from_pcap() untuk memastikan
-    referensi waktu yang seragam.
+    Metrik waktu (ttfb_s, ttlb_s) TIDAK dihitung di sini — semuanya dihitung
+    dari PCAP oleh parse_metrics_from_pcap() untuk memastikan referensi waktu
+    yang seragam.
     """
     sc          = SCENARIOS[scenario_id]
     get_request = (
@@ -438,8 +358,9 @@ def run_single_handshake(scenario_id: str, server_host: str, server_port: int) -
         "-brief",
     ]
 
-    # Cek ketersediaan /usr/bin/time -v
-    time_bin = shutil.which("time") or "/usr/bin/time"
+    # Cek ketersediaan /usr/bin/time -v (dilakukan sekali, di-cache bisa
+    # ditambahkan nanti jika performa menjadi concern)
+    time_bin = "/usr/bin/time"
     has_usr_time = False
     try:
         probe = subprocess.run(
@@ -450,38 +371,18 @@ def run_single_handshake(scenario_id: str, server_host: str, server_port: int) -
     except Exception:
         pass
 
-    # Bangun command lengkap: opsional dibungkus /usr/bin/time -v
     if has_usr_time:
         full_cmd = [time_bin, "-v"] + openssl_cmd
     else:
         full_cmd = openssl_cmd
-        logger.debug("/usr/bin/time -v tidak tersedia, melewati validasi CPU.")
+        logger.warning("/usr/bin/time -v tidak tersedia — resource metrics tidak akan tersedia.")
 
     proc = subprocess.Popen(
         full_cmd,
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,   # pisahkan stderr agar bisa parse /usr/bin/time
+        stderr=subprocess.PIPE,
     )
-
-    # Ketika dibungkus /usr/bin/time -v, proc.pid adalah PID proses 'time',
-    # bukan 'openssl'. psutil perlu memonitor child process (openssl) agar
-    # CPU dan RAM yang terukur adalah milik openssl, bukan shell wrapper.
-    # Tunggu sebentar agar child process sempat di-spawn sebelum kita cari.
-    monitor_pid = proc.pid
-    if has_usr_time:
-        time.sleep(0.05)
-        try:
-            parent = psutil.Process(proc.pid)
-            children = parent.children(recursive=True)
-            if children:
-                monitor_pid = children[0].pid
-                logger.debug(f"Memonitor child PID {monitor_pid} (openssl) bukan parent PID {proc.pid} (time)")
-        except psutil.NoSuchProcess:
-            logger.debug("Child process tidak ditemukan, tetap monitor parent PID")
-
-    monitor = ResourceMonitor(monitor_pid)
-    monitor.start()
 
     stdout_data = b""
     stderr_data = b""
@@ -501,40 +402,28 @@ def run_single_handshake(scenario_id: str, server_host: str, server_port: int) -
         stderr_data = proc.stderr.read()
         proc.wait()
     except subprocess.TimeoutExpired:
-        monitor.stop()
         proc.kill()
         raise TimeoutError(f"OpenSSL timeout (Port {server_port})")
     except Exception as e:
-        monitor.stop()
         proc.kill()
         raise e
-    finally:
-        monitor.stop()
 
-    # openssl s_client mengeluarkan output ke stdout (karena -brief + stderr=PIPE terpisah)
-    # Cek return code — /usr/bin/time meneruskan exit code child process
     if proc.returncode != 0:
         combined = (stdout_data + stderr_data).decode(errors="ignore").strip()
         logger.error(f"OpenSSL Error (Code {proc.returncode}): {combined[:400]}")
         raise RuntimeError("Handshake dibatalkan oleh OpenSSL")
 
-    # Parse /usr/bin/time -v dari stderr
     usr_time_data = {}
     if has_usr_time:
         usr_time_data = _parse_usr_time_output(stderr_data.decode(errors="ignore"))
         if not usr_time_data:
-            logger.debug("/usr/bin/time output tidak dapat diparsing dari stderr.")
+            logger.warning("/usr/bin/time output tidak dapat diparsing dari stderr.")
 
     return {
-        # psutil (real-time monitoring, lihat catatan limitasi di ResourceMonitor)
-        "cpu_peak_pct":  monitor.cpu_peak,
-        "cpu_mean_pct":  monitor.cpu_mean,
-        "ram_peak_bytes": monitor.ram_peak_bytes,
-        # /usr/bin/time -v (validasi, lebih akurat untuk CPU time total)
-        "cpu_usr_s":     usr_time_data.get("cpu_usr_s"),
-        "cpu_sys_s":     usr_time_data.get("cpu_sys_s"),
-        "cpu_pct_time":  usr_time_data.get("cpu_pct_time"),
-        "max_rss_kb":    usr_time_data.get("max_rss_kb"),
+        "cpu_usr_s":    usr_time_data.get("cpu_usr_s"),
+        "cpu_sys_s":    usr_time_data.get("cpu_sys_s"),
+        "cpu_pct_time": usr_time_data.get("cpu_pct_time"),
+        "max_rss_kb":   usr_time_data.get("max_rss_kb"),
     }
 
 
@@ -582,17 +471,9 @@ def run_scenario(scenario_id: str, network_condition: str, output_dir: Path) -> 
                 "is_warmup":        is_warmup,
                 "timestamp":        datetime.now(UTC).isoformat(),
                 # ── Metrik waktu (dari PCAP, referensi t=0 = ClientHello pertama)
-                "handshake_time_ms": (
-                    time_metrics["handshake_time_s"] * 1000
-                    if time_metrics["handshake_time_s"] is not None else None
-                ),
                 "ttfb_ms":          time_metrics["ttfb_s"] * 1000,
                 "ttlb_ms":          time_metrics["ttlb_s"] * 1000,
-                # ── CPU & RAM (psutil)
-                "cpu_peak_pct":     resource_metrics["cpu_peak_pct"],
-                "cpu_mean_pct":     resource_metrics["cpu_mean_pct"],
-                "ram_peak_bytes":   resource_metrics["ram_peak_bytes"],
-                # ── CPU & RAM (/usr/bin/time -v, validasi)
+                # ── Resource (/usr/bin/time -v)
                 "cpu_usr_s":        resource_metrics["cpu_usr_s"],
                 "cpu_sys_s":        resource_metrics["cpu_sys_s"],
                 "cpu_pct_time":     resource_metrics["cpu_pct_time"],
@@ -601,18 +482,12 @@ def run_scenario(scenario_id: str, network_condition: str, output_dir: Path) -> 
 
             if not is_warmup:
                 results.append(row)
-                hs_str = (
-                    f"{row['handshake_time_ms']:7.2f}ms"
-                    if row["handshake_time_ms"] is not None
-                    else "    N/A  "
-                )
                 logger.info(
                     f"[{label}] "
-                    f"HS={hs_str}  "
                     f"TTFB={row['ttfb_ms']:7.2f}ms  "
                     f"TTLB={row['ttlb_ms']:7.2f}ms  "
-                    f"CPU={row['cpu_peak_pct']:5.1f}%  "
-                    f"RAM={row['ram_peak_bytes'] // 1024}KB"
+                    f"CPU={row['cpu_pct_time']}  "
+                    f"RAM={row['max_rss_kb']}KB"
                 )
 
         except Exception as exc:
