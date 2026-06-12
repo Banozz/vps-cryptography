@@ -194,6 +194,9 @@ def start_tshark(port: int, pcap_path: str) -> subprocess.Popen:
     Mulai tshark pada CAPTURE_INTERFACE dengan BPF filter tcp port <port>.
     Menunggu 1 detik setelah Popen agar tshark selesai membuka interface
     sebelum handshake dimulai.
+
+    stderr dialihkan ke PIPE (bukan DEVNULL) agar error tshark bisa
+    dideteksi oleh stop_tshark() dan di-log untuk debugging.
     """
     cmd = [
         "tshark",
@@ -204,13 +207,32 @@ def start_tshark(port: int, pcap_path: str) -> subprocess.Popen:
     ]
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     time.sleep(1.0)
+
+    # Deteksi dini: kalau tshark langsung exit (mis. interface tidak valid),
+    # tangkap errornya sekarang sebelum handshake dimulai.
+    if proc.poll() is not None:
+        stderr_out = proc.stderr.read().decode(errors="ignore").strip()
+        raise RuntimeError(f"tshark exit prematur (code {proc.returncode}): {stderr_out}")
+
     return proc
 
 
 def stop_tshark(proc: subprocess.Popen):
     proc.terminate()
     try:
-        proc.wait(timeout=5)
+        _, stderr_data = proc.communicate(timeout=5)
+        # Log stderr tshark kalau ada isi selain pesan "running as root" yang normal
+        if stderr_data:
+            msg = stderr_data.decode(errors="ignore").strip()
+            # Filter pesan warning standar yang tidak actionable
+            non_trivial = [
+                line for line in msg.splitlines()
+                if "Running as user" not in line
+                and "This could be dangerous" not in line
+                and line.strip()
+            ]
+            if non_trivial:
+                logger.debug(f"tshark stderr: {chr(10).join(non_trivial)}")
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.wait()
@@ -442,7 +464,23 @@ def run_single_handshake(scenario_id: str, server_host: str, server_port: int) -
         stderr=subprocess.PIPE,   # pisahkan stderr agar bisa parse /usr/bin/time
     )
 
-    monitor = ResourceMonitor(proc.pid)
+    # Ketika dibungkus /usr/bin/time -v, proc.pid adalah PID proses 'time',
+    # bukan 'openssl'. psutil perlu memonitor child process (openssl) agar
+    # CPU dan RAM yang terukur adalah milik openssl, bukan shell wrapper.
+    # Tunggu sebentar agar child process sempat di-spawn sebelum kita cari.
+    monitor_pid = proc.pid
+    if has_usr_time:
+        time.sleep(0.05)
+        try:
+            parent = psutil.Process(proc.pid)
+            children = parent.children(recursive=True)
+            if children:
+                monitor_pid = children[0].pid
+                logger.debug(f"Memonitor child PID {monitor_pid} (openssl) bukan parent PID {proc.pid} (time)")
+        except psutil.NoSuchProcess:
+            logger.debug("Child process tidak ditemukan, tetap monitor parent PID")
+
+    monitor = ResourceMonitor(monitor_pid)
     monitor.start()
 
     stdout_data = b""
