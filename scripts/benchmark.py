@@ -266,6 +266,7 @@ def parse_metrics_from_pcap(
         # terbungkus sebagai Application Data (content_type 23) sehingga tidak
         # bisa difilter → handshake_s = None.
         handshake_s = None
+        t_finished_abs = None
         fin_rows = _tshark_query(
             pcap_path,
             f"tls.handshake.type == 20 and tcp.srcport == {server_port}",
@@ -274,7 +275,8 @@ def parse_metrics_from_pcap(
         )
         fin_times = [float(r[0]) for r in fin_rows if r and r[0].strip()]
         if fin_times:
-            handshake_s = min(fin_times) - t_ref
+            t_finished_abs = min(fin_times)
+            handshake_s = t_finished_abs - t_ref
 
         # ── Application Data dari server (TTFB & TTLB) ───────────────────────
         # tls.app_data = filter tshark untuk Application Data record (konten terenkripsi)
@@ -303,15 +305,42 @@ def parse_metrics_from_pcap(
             logger.warning("PCAP parse: Application Data payload tidak ditemukan.")
             return None
 
-        # PERINGATAN (tanpa keylog): record handshake server (EncryptedExtensions,
-        # Certificate, CertificateVerify, Finished) JUGA muncul sebagai
-        # Application Data — TLS 1.3 membungkus semua record terenkripsi sebagai
-        # content_type 23. Akibatnya min() di bawah menangkap *flight handshake*,
-        # BUKAN byte pertama HTTP response → "TTFB" sebenarnya proxy handshake.
-        # Dengan keylog (didekripsi), tls.app_data hanya cocok dengan Application
-        # Data sejati sehingga TTFB benar-benar byte pertama response server.
-        ttfb_s = min(app_payload_times) - t_ref
+        # ── TTLB: Time-To-Last-Byte ─────────────────────────────────────
+        # Pada PCAP terdekripsi, tls.app_data hanya cocok dengan Application Data
+        # SEJATI (record handshake jadi tls.handshake, close_notify jadi tls.alert).
+        # Field tls.app_data hanya muncul di frame tempat TCP reassembly record
+        # TLS SELESAI → timestamp-nya = byte TERAKHIR record tiba. max() = byte
+        # terakhir seluruh respons. Inilah TTLB.
         ttlb_s = max(app_payload_times) - t_ref
+
+        # ── TTFB: Time-To-First-Byte ─────────────────────────────────
+        # KENAPA TIDAK pakai tls.app_data: jika server mengirim seluruh payload
+        # sebagai SATU record TLS, hanya ADA SATU frame tls.app_data (di titik
+        # TCP reassembly selesai) → min()==max() → TTFB==TTLB. Itu keliru.
+        # Yang benar: byte pertama = TCP segment pertama BERMUATAN (tcp.len > 0)
+        # dari server yang tiba SETELAH server Finished. Disaring via frame.time_epoch
+        # > timestamp absolut Finished agar flight handshake (yang juga tcp.len>0)
+        # tidak ikut terhitung. Segment ini boleh jadi masih "TCP segment of a
+        # reassembled PDU" (belum lengkap sebagai record TLS), tapi timestamp-nya
+        # tetap sah sebagai "byte pertama respons tiba".
+        ttfb_s = None
+        if t_finished_abs is not None:
+            seg_rows = _tshark_query(
+                pcap_path,
+                (f"tcp.srcport == {server_port} and tcp.len > 0 "
+                 f"and frame.time_epoch > {t_finished_abs:.9f}"),
+                ["frame.time_epoch"],
+                keylog_path,
+            )
+            seg_times = [float(r[0]) for r in seg_rows if r and r[0].strip()]
+            if seg_times:
+                ttfb_s = min(seg_times) - t_ref
+        if ttfb_s is None:
+            # Fallback (mis. tanpa keylog → t_finished tak diketahui): pakai frame
+            # tls.app_data paling awal. CATATAN: bisa salah ukur (proxy handshake
+            # atau identik dengan TTLB). Hanya agar pipeline tidak gagal.
+            logger.warning("TTFB fallback ke min(tls.app_data) — hasil mungkin tidak akurat.")
+            ttfb_s = min(app_payload_times) - t_ref
 
         return {
             "handshake_s": handshake_s,   # None bila PCAP tidak didekripsi (tanpa keylog)
@@ -329,7 +358,7 @@ def parse_metrics_from_pcap(
 
 # ─────────────────────────────────────────────────────────────────────────────
 # /usr/bin/time -v parser (untuk validasi CPU)
-# ─────────────────────────────────────────────────────────────────────────────
+# ────────────────────────────────────��────────────────────────────────────────
 def _parse_usr_time_output(stderr_text: str) -> dict:
     """
     Parse output /usr/bin/time -v.
