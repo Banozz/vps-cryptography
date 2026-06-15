@@ -1,0 +1,8 @@
+Connecting to 74.125.24.138
+depth=2 C=US, O=Google Trust Services LLC, CN=GTS Root R1
+verify return:1
+depth=1 C=US, O=Google Trust Services, CN=WR2
+verify return:1
+depth=0 CN=*.google.com
+verify return:1
+C05250BE157F0000:error:0A000126:SSL routines::unexpected eof while reading:ssl/record/rec_layer_s3.c:689:
