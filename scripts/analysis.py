@@ -48,7 +48,8 @@ METRICS_CONFIG = {
     "handshake_ms": ("Handshake Time (ms)", "Handshake Time", "ms"),
     "ttfb_ms":      ("TTFB (ms)",           "TTFB",           "ms"),
     "ttlb_ms":      ("TTLB (ms)",           "TTLB",           "ms"),
-    "cpu_pct":      ("CPU (%)",             "CPU",            "pct"),
+    "cpu_ms":       ("CPU Time (ms)",       "CPU Time",       "ms"),
+    "cpu_pct":      ("CPU Util (%)",        "CPU Util",       "pct"),
     "max_rss_kb":   ("RAM Peak (KB)",       "RAM Peak",       "kb"),
 }
 
@@ -82,12 +83,21 @@ def load_results(results_file: Path) -> pd.DataFrame:
     if "cpu_pct_time" in df.columns:
         df["cpu_pct"] = df["cpu_pct_time"].apply(_parse_cpu_pct)
 
-    # Total CPU seconds (user + sys) sebagai metrik tambahan opsional.
+    # Total CPU seconds (user + sys).
     if "cpu_usr_s" in df.columns and "cpu_sys_s" in df.columns:
         df["cpu_total_s"] = (
             pd.to_numeric(df["cpu_usr_s"], errors="coerce").fillna(0)
             + pd.to_numeric(df["cpu_sys_s"], errors="coerce").fillna(0)
         )
+
+    # cpu_ms = metrik biaya komputasi PRIMER (absolut, invarian thd delay jaringan).
+    # Utamakan kolom cpu_ms dari CSV benchmark.py terbaru (getrusage, presisi us).
+    # Bila tidak ada (CSV lama), turunkan dari cpu_usr_s+cpu_sys_s (resolusi 10ms,
+    # bisa terkuantisasi ke 0 untuk kerja sub-10ms -- pakai CSV terbaru bila bisa).
+    if "cpu_ms" not in df.columns and "cpu_total_s" in df.columns:
+        df["cpu_ms"] = df["cpu_total_s"] * 1000.0
+    if "cpu_ms" in df.columns:
+        df["cpu_ms"] = pd.to_numeric(df["cpu_ms"], errors="coerce")
 
     # Pastikan kolom metrik waktu numerik (handshake_ms bisa kosong -> NaN).
     for col in ("handshake_ms", "ttfb_ms", "ttlb_ms", "max_rss_kb"):
@@ -231,9 +241,15 @@ def assess_feasibility(df: pd.DataFrame) -> dict:
     ttlb_c = get("C", "ideal", "ttlb_ms").median()
     ttlb_ovh = _safe_overhead(ttlb_a, ttlb_c)
 
+    # cpu_pct HANYA dibandingkan pada kondisi ideal; di edge terdilusi waktu tunggu I/O.
     cpu_series = get("C", "ideal", "cpu_pct")
     cpu_c_p95 = float(cpu_series.quantile(0.95)) if len(cpu_series) else float("nan")
     cpu_c_max = float(cpu_series.max()) if len(cpu_series) else float("nan")
+
+    # Biaya komputasi absolut (cpu_ms) C vs A pada ideal -- metrik primer.
+    cpu_ms_a = get("A", "ideal", "cpu_ms").median()
+    cpu_ms_c = get("C", "ideal", "cpu_ms").median()
+    cpu_ms_ovh = _safe_overhead(cpu_ms_a, cpu_ms_c)
 
     feas_hs = bool(hs_ovh <= THRESHOLD_LATENCY_OVERHEAD_PCT) if pd.notna(hs_ovh) else None
     feas_ttlb = bool(ttlb_ovh <= THRESHOLD_LATENCY_OVERHEAD_PCT) if pd.notna(ttlb_ovh) else None
@@ -248,7 +264,10 @@ def assess_feasibility(df: pd.DataFrame) -> dict:
         "ttlb_overhead_pct": float(ttlb_ovh),
         "cpu_p95_pct": float(cpu_c_p95),
         "cpu_max_pct": float(cpu_c_max),
-        "cpu_note": "cpu_pct = rata-rata CPU proses (/usr/bin/time); P95 dipakai sebagai proksi peak",
+        "cpu_ms_median_A_ideal": float(cpu_ms_a) if pd.notna(cpu_ms_a) else None,
+        "cpu_ms_median_C_ideal": float(cpu_ms_c) if pd.notna(cpu_ms_c) else None,
+        "cpu_ms_overhead_pct_ideal": float(cpu_ms_ovh),
+        "cpu_note": 'Metrik CPU primer = cpu_ms (waktu CPU absolut via getrusage, invarian thd jaringan). cpu_pct (utilisasi %) hanya valid pada kondisi ideal; P95-nya dipakai sebagai proksi peak utk kriteria 3.5.',
         "threshold_latency_pct": THRESHOLD_LATENCY_OVERHEAD_PCT,
         "threshold_cpu_pct": THRESHOLD_CPU_PEAK_PCT,
         "criterion_handshake_passed": feas_hs,
@@ -344,6 +363,16 @@ def print_summary(report: dict):
         f"  CPU P95 (proksi peak) Skenario C:  "
         f"{feas.get('cpu_p95_pct', float('nan')):.1f}% "
         f"(≤{THRESHOLD_CPU_PEAK_PCT}%) → {_pass_str(feas.get('criterion_cpu_passed'))}"
+    )
+    _cpu_ms_ovh = feas.get("cpu_ms_overhead_pct_ideal", float("nan"))
+    _ms_str = ("%+.1f%%" % _cpu_ms_ovh) if _cpu_ms_ovh == _cpu_ms_ovh else "N/A"
+    _a = feas.get("cpu_ms_median_A_ideal")
+    _c = feas.get("cpu_ms_median_C_ideal")
+    _a = float("nan") if _a is None else _a
+    _c = float("nan") if _c is None else _c
+    print(
+        f"  CPU Time (cpu_ms) C vs A (ideal):  "
+        f"A={_a:.3f}ms C={_c:.3f}ms (overhead {_ms_str}) [metrik primer]"
     )
     print(f"\n  Verdict: {_pass_str(feas.get('overall_feasible'))}")
     print(sep + "\n")
