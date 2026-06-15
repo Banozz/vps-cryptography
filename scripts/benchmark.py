@@ -189,12 +189,22 @@ def stop_tshark(proc: subprocess.Popen):
 # ─────────────────────────────────────────────────────────────────────────────
 # PCAP Parser: Handshake Time, TTFB, TTLB
 # ─────────────────────────────────────────────────────────────────────────────
-def _tshark_query(pcap_path: str, display_filter: str, fields: list[str]) -> list[list[str]]:
+def _tshark_query(pcap_path: str, display_filter: str, fields: list[str],
+                  keylog_path: Optional[str] = None) -> list[list[str]]:
     """
     Helper: jalankan tshark -r dengan display filter dan field list tertentu.
+    Jika keylog_path diberikan dan ada, tshark mendekripsi TLS 1.3 memakai
+    session keys di file tsb (-o tls.keylog_file:...), sehingga record
+    handshake terenkripsi (mis. Finished = type 20) dan Application Data
+    sejati bisa DIBEDAKAN. Tanpa keylog, semua record terenkripsi (termasuk
+    Certificate/CertificateVerify/Finished server) tampak sebagai
+    Application Data (content_type 23).
     Kembalikan list of rows (setiap row adalah list of field values).
     """
-    cmd = ["tshark", "-r", pcap_path, "-Y", display_filter, "-T", "fields"]
+    cmd = ["tshark", "-r", pcap_path]
+    if keylog_path and os.path.exists(keylog_path):
+        cmd += ["-o", f"tls.keylog_file:{keylog_path}"]
+    cmd += ["-Y", display_filter, "-T", "fields"]
     for f in fields:
         cmd += ["-e", f]
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
@@ -208,6 +218,7 @@ def _tshark_query(pcap_path: str, display_filter: str, fields: list[str]) -> lis
 def parse_metrics_from_pcap(
     pcap_path: str,
     server_port: int,
+    keylog_path: Optional[str] = None,
 ) -> Optional[dict]:
     """
     Parsing dua metrik waktu dari PCAP menggunakan referensi waktu yang seragam.
@@ -241,12 +252,29 @@ def parse_metrics_from_pcap(
             pcap_path,
             f"tls.handshake.type == 1 and tcp.dstport == {server_port}",
             ["frame.time_epoch"],
+            keylog_path,
         )
         ch_times = [float(r[0]) for r in ch_rows if r and r[0].strip()]
         if not ch_times:
             logger.warning("PCAP parse: ClientHello tidak ditemukan.")
             return None
         t_ref = min(ch_times)   # t=0, pakai ClientHello pertama (handle HRR)
+
+        # ── Handshake Time: ClientHello[0] → server Finished (type 20) ───────
+        # CATATAN PENTING: tls.handshake.type == 20 HANYA terekspos jika PCAP
+        # didekripsi (keylog tersedia). Tanpa keylog, Finished server ikut
+        # terbungkus sebagai Application Data (content_type 23) sehingga tidak
+        # bisa difilter → handshake_s = None.
+        handshake_s = None
+        fin_rows = _tshark_query(
+            pcap_path,
+            f"tls.handshake.type == 20 and tcp.srcport == {server_port}",
+            ["frame.time_epoch"],
+            keylog_path,
+        )
+        fin_times = [float(r[0]) for r in fin_rows if r and r[0].strip()]
+        if fin_times:
+            handshake_s = min(fin_times) - t_ref
 
         # ── Application Data dari server (TTFB & TTLB) ───────────────────────
         # tls.app_data = filter tshark untuk Application Data record (konten terenkripsi)
@@ -255,6 +283,7 @@ def parse_metrics_from_pcap(
             pcap_path,
             f"tls.app_data and tcp.srcport == {server_port}",
             ["frame.time_epoch", "frame.len"],
+            keylog_path,
         )
 
         # Saring close_notify: buang paket dengan frame.len <= CLOSE_NOTIFY_MAX_FRAME_LEN
@@ -274,10 +303,18 @@ def parse_metrics_from_pcap(
             logger.warning("PCAP parse: Application Data payload tidak ditemukan.")
             return None
 
+        # PERINGATAN (tanpa keylog): record handshake server (EncryptedExtensions,
+        # Certificate, CertificateVerify, Finished) JUGA muncul sebagai
+        # Application Data — TLS 1.3 membungkus semua record terenkripsi sebagai
+        # content_type 23. Akibatnya min() di bawah menangkap *flight handshake*,
+        # BUKAN byte pertama HTTP response → "TTFB" sebenarnya proxy handshake.
+        # Dengan keylog (didekripsi), tls.app_data hanya cocok dengan Application
+        # Data sejati sehingga TTFB benar-benar byte pertama response server.
         ttfb_s = min(app_payload_times) - t_ref
         ttlb_s = max(app_payload_times) - t_ref
 
         return {
+            "handshake_s": handshake_s,   # None bila PCAP tidak didekripsi (tanpa keylog)
             "ttfb_s": ttfb_s,
             "ttlb_s": ttlb_s,
         }
@@ -324,7 +361,8 @@ def _parse_usr_time_output(stderr_text: str) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 # Satu iterasi handshake
 # ─────────────────────────────────────────────────────────────────────────────
-def run_single_handshake(scenario_id: str, server_host: str, server_port: int) -> dict:
+def run_single_handshake(scenario_id: str, server_host: str, server_port: int,
+                         keylog_path: Optional[str] = None) -> dict:
     """
     Menjalankan satu iterasi openssl s_client dan mengumpulkan resource metrics
     via /usr/bin/time -v.
@@ -353,6 +391,10 @@ def run_single_handshake(scenario_id: str, server_host: str, server_port: int) -
         "-ign_eof",
         "-brief",
     ]
+    # Tulis TLS 1.3 session keys ke file agar PCAP bisa didekripsi tshark.
+    # Diverifikasi: OpenSSL 3.2.2 s_client mendukung opsi -keylogfile.
+    if keylog_path:
+        openssl_cmd += ["-keylogfile", keylog_path]
 
     # Cek ketersediaan /usr/bin/time -v (dilakukan sekali, di-cache bisa
     # ditambahkan nanti jika performa menjadi concern)
@@ -445,17 +487,18 @@ def run_scenario(scenario_id: str, network_condition: str, output_dir: Path) -> 
             else f"data-{idx - WARMUP_ITERATIONS + 1:03d}"
         )
         pcap_path = str(pcap_dir / f"{label}.pcap")
+        keylog_path = str(pcap_dir / f"{label}.keylog")
 
         tshark_proc = start_tshark(port, pcap_path)
         try:
-            resource_metrics = run_single_handshake(scenario_id, SERVER_HOST, port)
+            resource_metrics = run_single_handshake(scenario_id, SERVER_HOST, port, keylog_path)
 
             # Tunggu sebentar agar paket terakhir sempat ditulis tshark ke disk
             time.sleep(1.0)
             stop_tshark(tshark_proc)
             time.sleep(0.5)
 
-            time_metrics = parse_metrics_from_pcap(pcap_path, port)
+            time_metrics = parse_metrics_from_pcap(pcap_path, port, keylog_path)
             if time_metrics is None:
                 raise ValueError("Gagal mem-parsing metrik waktu dari PCAP")
 
@@ -466,7 +509,9 @@ def run_scenario(scenario_id: str, network_condition: str, output_dir: Path) -> 
                 "iteration":        label,
                 "is_warmup":        is_warmup,
                 "timestamp":        datetime.now(UTC).isoformat(),
-                # ── Metrik waktu (dari PCAP, referensi t=0 = ClientHello pertama)
+                # ── Metrik waktu (dari PCAP didekripsi, t=0 = ClientHello pertama)
+                "handshake_ms":     (time_metrics["handshake_s"] * 1000
+                                     if time_metrics["handshake_s"] is not None else None),
                 "ttfb_ms":          time_metrics["ttfb_s"] * 1000,
                 "ttlb_ms":          time_metrics["ttlb_s"] * 1000,
                 # ── Resource (/usr/bin/time -v)
@@ -478,8 +523,11 @@ def run_scenario(scenario_id: str, network_condition: str, output_dir: Path) -> 
 
             if not is_warmup:
                 results.append(row)
+                hs_str = (f"{row['handshake_ms']:7.2f}ms"
+                          if row['handshake_ms'] is not None else "   n/a   ")
                 logger.info(
                     f"[{label}] "
+                    f"HS={hs_str}  "
                     f"TTFB={row['ttfb_ms']:7.2f}ms  "
                     f"TTLB={row['ttlb_ms']:7.2f}ms  "
                     f"CPU={row['cpu_pct_time']}  "
