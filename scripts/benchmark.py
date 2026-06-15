@@ -277,15 +277,21 @@ def parse_metrics_from_pcap(
         # bisa difilter → handshake_s = None.
         handshake_s = None
         t_finished_abs = None
+        fin_frame_number = None
         fin_rows = _tshark_query(
             pcap_path,
             f"tls.handshake.type == 20 and tcp.srcport == {server_port}",
-            ["frame.time_epoch"],
+            ["frame.time_epoch", "frame.number"],
             keylog_path,
         )
-        fin_times = [float(r[0]) for r in fin_rows if r and r[0].strip()]
-        if fin_times:
-            t_finished_abs = min(fin_times)
+        fin_parsed = [
+            (float(r[0]), int(r[1]))
+            for r in fin_rows
+            if len(r) >= 2 and r[0].strip() and r[1].strip()
+        ]
+        if fin_parsed:
+            fin_parsed.sort(key=lambda x: x[0])
+            t_finished_abs, fin_frame_number = fin_parsed[0]
             handshake_s = t_finished_abs - t_ref
 
         # ── Application Data dari server (TTFB & TTLB) ───────────────────────
@@ -328,17 +334,18 @@ def parse_metrics_from_pcap(
         # sebagai SATU record TLS, hanya ADA SATU frame tls.app_data (di titik
         # TCP reassembly selesai) → min()==max() → TTFB==TTLB. Itu keliru.
         # Yang benar: byte pertama = TCP segment pertama BERMUATAN (tcp.len > 0)
-        # dari server yang tiba SETELAH server Finished. Disaring via frame.time_epoch
-        # > timestamp absolut Finished agar flight handshake (yang juga tcp.len>0)
-        # tidak ikut terhitung. Segment ini boleh jadi masih "TCP segment of a
+        # dari server yang tiba SETELAH server Finished. Disaring via frame.number
+        # > nomor frame Finished agar flight handshake (yang juga tcp.len>0) dan
+        # frame Finished itu sendiri tidak ikut terhitung. (Perbandingan epoch
+        # ber-:.9f rawan membatalkan filter > pada batas, jadi pakai frame.number.) Segment ini boleh jadi masih "TCP segment of a
         # reassembled PDU" (belum lengkap sebagai record TLS), tapi timestamp-nya
         # tetap sah sebagai "byte pertama respons tiba".
         ttfb_s = None
-        if t_finished_abs is not None:
+        if fin_frame_number is not None:
             seg_rows = _tshark_query(
                 pcap_path,
                 (f"tcp.srcport == {server_port} and tcp.len > 0 "
-                 f"and frame.time_epoch > {t_finished_abs:.9f}"),
+                 f"and frame.number > {fin_frame_number}"),
                 ["frame.time_epoch"],
                 keylog_path,
             )
