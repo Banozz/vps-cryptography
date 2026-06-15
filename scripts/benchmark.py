@@ -9,16 +9,25 @@ Metrik yang diukur:
     - TTLB  : ClientHello[0] → Application Data terakhir dari server
               (close_notify dikecualikan via CLOSE_NOTIFY_MAX_FRAME_LEN)
 
-  Resource (dari /usr/bin/time -v):
-    - cpu_usr_s    : CPU user time (seconds)
-    - cpu_sys_s    : CPU system time (seconds)
-    - cpu_pct_time : Persentase CPU yang digunakan (string, mis. "52%")
-    - max_rss_kb   : Peak RAM usage (KB)
+  Resource:
+    - cpu_usr_s    : CPU user time (detik) via resource.getrusage (presisi mikrodetik)
+    - cpu_sys_s    : CPU system time (detik) via resource.getrusage (presisi mikrodetik)
+    - cpu_ms       : total waktu CPU (user+sys) dalam ms — metrik biaya komputasi
+                     PRIMER, invarian terhadap delay jaringan
+    - cpu_pct_time : Persentase CPU dari /usr/bin/time -v (string, mis. "52%"); hanya
+                     valid untuk perbandingan DALAM kondisi jaringan yang sama karena
+                     terdilusi oleh waktu tunggu I/O
+    - max_rss_kb   : Peak RAM usage (KB) dari /usr/bin/time -v (fallback: ru_maxrss)
 
   Catatan: psutil dihapus karena cpu_percent(interval=None) selalu mengembalikan
   0.0 di environment container ini (kernel tidak mengupdate /proc/<pid>/stat
-  untuk child processes secara real-time). /usr/bin/time -v menggunakan wait4()
-  syscall yang lebih akurat dan tidak bergantung pada polling.
+  untuk child processes secara real-time).
+
+  Waktu CPU absolut diambil dari resource.getrusage(RUSAGE_CHILDREN) (ru_utime/
+  ru_stime, presisi mikrodetik), BUKAN dari teks /usr/bin/time -v. Sebab field
+  "User/System time (seconds)" pada /usr/bin/time hanya 2 desimal (resolusi 10ms),
+  sehingga kerja kripto ~3-5ms membulat ke 0.00s. getrusage merekamnya sebagai
+  ~0.004s. /usr/bin/time tetap dipakai untuk cpu_pct_time dan max_rss_kb.
 """
 
 import argparse
@@ -27,6 +36,7 @@ import json
 import logging
 import os
 import re
+import resource
 import shutil
 import subprocess
 import time
@@ -444,6 +454,11 @@ def run_single_handshake(scenario_id: str, server_host: str, server_port: int,
         full_cmd = openssl_cmd
         logger.warning("/usr/bin/time -v tidak tersedia — resource metrics tidak akan tersedia.")
 
+    # Snapshot CPU child sebelum menjalankan handshake (presisi mikrodetik).
+    # Handshake berjalan SERIAL & tiap child di-wait, sehingga delta before/after
+    # mengisolasi CPU iterasi ini. tshark di-reap di luar jendela ini (di run_scenario),
+    # jadi tidak ikut terhitung.
+    rusage_before = resource.getrusage(resource.RUSAGE_CHILDREN)
     proc = subprocess.Popen(
         full_cmd,
         stdin=subprocess.PIPE,
@@ -475,6 +490,10 @@ def run_single_handshake(scenario_id: str, server_host: str, server_port: int,
         proc.kill()
         raise e
 
+    rusage_after = resource.getrusage(resource.RUSAGE_CHILDREN)
+    cpu_usr_s = rusage_after.ru_utime - rusage_before.ru_utime
+    cpu_sys_s = rusage_after.ru_stime - rusage_before.ru_stime
+
     if proc.returncode != 0:
         combined = (stdout_data + stderr_data).decode(errors="ignore").strip()
         logger.error(f"OpenSSL Error (Code {proc.returncode}): {combined[:400]}")
@@ -486,11 +505,21 @@ def run_single_handshake(scenario_id: str, server_host: str, server_port: int,
         if not usr_time_data:
             logger.warning("/usr/bin/time output tidak dapat diparsing dari stderr.")
 
+    # Waktu CPU absolut dari getrusage (presisi mikrodetik), bukan dari teks
+    # /usr/bin/time yang hanya 2 desimal (membulat ke 0.00 untuk kerja sub-10ms).
+    cpu_ms = (cpu_usr_s + cpu_sys_s) * 1000.0
+
+    # max_rss: utamakan /usr/bin/time; fallback ke ru_maxrss (KB di Linux).
+    max_rss_kb = usr_time_data.get("max_rss_kb")
+    if max_rss_kb is None:
+        max_rss_kb = int(rusage_after.ru_maxrss)
+
     return {
-        "cpu_usr_s":    usr_time_data.get("cpu_usr_s"),
-        "cpu_sys_s":    usr_time_data.get("cpu_sys_s"),
+        "cpu_usr_s":    cpu_usr_s,
+        "cpu_sys_s":    cpu_sys_s,
+        "cpu_ms":       cpu_ms,
         "cpu_pct_time": usr_time_data.get("cpu_pct_time"),
-        "max_rss_kb":   usr_time_data.get("max_rss_kb"),
+        "max_rss_kb":   max_rss_kb,
     }
 
 
@@ -543,9 +572,10 @@ def run_scenario(scenario_id: str, network_condition: str, output_dir: Path) -> 
                                      if time_metrics["handshake_s"] is not None else None),
                 "ttfb_ms":          time_metrics["ttfb_s"] * 1000,
                 "ttlb_ms":          time_metrics["ttlb_s"] * 1000,
-                # ── Resource (/usr/bin/time -v)
+                # ── Resource (CPU absolut via getrusage µs; pct & RAM via /usr/bin/time)
                 "cpu_usr_s":        resource_metrics["cpu_usr_s"],
                 "cpu_sys_s":        resource_metrics["cpu_sys_s"],
+                "cpu_ms":           resource_metrics["cpu_ms"],
                 "cpu_pct_time":     resource_metrics["cpu_pct_time"],
                 "max_rss_kb":       resource_metrics["max_rss_kb"],
             }
@@ -560,6 +590,7 @@ def run_scenario(scenario_id: str, network_condition: str, output_dir: Path) -> 
                     f"TTFB={row['ttfb_ms']:7.2f}ms  "
                     f"TTLB={row['ttlb_ms']:7.2f}ms  "
                     f"CPU={row['cpu_pct_time']}  "
+                    f"CPUms={row['cpu_ms']:6.3f}ms  "
                     f"RAM={row['max_rss_kb']}KB"
                 )
 
