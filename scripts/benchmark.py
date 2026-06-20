@@ -82,6 +82,12 @@ PCAP_MIN_VALID_BYTES = 1000
 # dari perhitungan TTLB.
 CLOSE_NOTIFY_MAX_FRAME_LEN = 100
 
+# Batas waktu (detik) untuk SATU iterasi openssl s_client. Mencegah proses
+# menggantung tak terbatas ketika FIN/close_notify dari server hilang akibat
+# packet loss (kondisi edge) — apalagi dengan flag -ign_eof yang membuat
+# s_client menunggu server menutup koneksi.
+HANDSHAKE_TIMEOUT_S = int(os.environ.get("HANDSHAKE_TIMEOUT_S", "15"))
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Definisi Skenario
 # ─────────────────────────────────────────────────────────────────────────────
@@ -473,28 +479,27 @@ def run_single_handshake(scenario_id: str, server_host: str, server_port: int,
         stderr=subprocess.PIPE,
     )
 
-    stdout_data = b""
-    stderr_data = b""
+    # communicate() menulis stdin lalu membaca stdout+stderr SECARA BERSAMAAN
+    # (mencegah deadlock pipe) DAN menerapkan timeout wall-clock. Tanpa timeout,
+    # 'proc.stdout.read()' menggantung selamanya bila openssl s_client tidak
+    # pernah keluar — terjadi saat FIN/close_notify server hilang akibat packet
+    # loss (kondisi edge), apalagi dengan flag -ign_eof yang membuat s_client
+    # menunggu server menutup koneksi.
     try:
-        if proc.poll() is None:
-            proc.stdin.write(get_request)
-            proc.stdin.flush()
-        proc.stdin.close()
-
-        stdout_data = proc.stdout.read()
-        stderr_data = proc.stderr.read()
-        proc.wait(timeout=30)
-
-    except (BrokenPipeError, ValueError):
-        proc.stdin.close()
-        stdout_data = proc.stdout.read()
-        stderr_data = proc.stderr.read()
-        proc.wait()
+        stdout_data, stderr_data = proc.communicate(
+            input=get_request, timeout=HANDSHAKE_TIMEOUT_S
+        )
     except subprocess.TimeoutExpired:
         proc.kill()
-        raise TimeoutError(f"OpenSSL timeout (Port {server_port})")
+        stdout_data, stderr_data = proc.communicate()
+        raise TimeoutError(
+            f"OpenSSL timeout >{HANDSHAKE_TIMEOUT_S}s "
+            f"(skenario {scenario_id}, port {server_port}) — "
+            f"kemungkinan FIN/close_notify server hilang akibat packet loss"
+        )
     except Exception as e:
         proc.kill()
+        proc.communicate()
         raise e
 
     rusage_after = resource.getrusage(resource.RUSAGE_CHILDREN)
@@ -535,6 +540,11 @@ def run_single_handshake(scenario_id: str, server_host: str, server_port: int,
 # ─────────────────────────────────────────────────────────────────────────────
 def run_scenario(scenario_id: str, network_condition: str, output_dir: Path) -> list[dict]:
     port = PORT_SCENARIO[scenario_id]
+    sc   = SCENARIOS[scenario_id]
+    logger.info(
+        f"━━━━━ Skenario {scenario_id} — {sc['name']} | "
+        f"jaringan={network_condition} | port={port} | CA={sc['ca_cert']} ━━━━━"
+    )
     configure_netem(network_condition)
     time.sleep(0.5)
 
@@ -554,6 +564,10 @@ def run_scenario(scenario_id: str, network_condition: str, output_dir: Path) -> 
         pcap_path = str(pcap_dir / f"{label}.pcap")
         keylog_path = str(pcap_dir / f"{label}.keylog")
 
+        logger.info(
+            f"[sc{scenario_id}|{network_condition}|{label}] "
+            f"▶ memulai handshake (cert: {SCENARIOS[scenario_id]['name']})..."
+        )
         tshark_proc = start_tshark(port, pcap_path)
         try:
             resource_metrics = run_single_handshake(scenario_id, SERVER_HOST, port, keylog_path)
@@ -587,12 +601,15 @@ def run_scenario(scenario_id: str, network_condition: str, output_dir: Path) -> 
                 "max_rss_kb":       resource_metrics["max_rss_kb"],
             }
 
+            # Catat SEMUA iterasi (warm-up + data) ke CSV. Ambang warm-up
+            # ditentukan POST-HOC lewat kolom is_warmup (lihat
+            # warmup_convergence.py / analysis.py), tanpa perlu run ulang.
             results.append(row)
             hs_str = (f"{row['handshake_ms']:7.2f}ms"
                       if row['handshake_ms'] is not None else "   n/a   ")
             tag = "warmup" if is_warmup else " data "
             logger.info(
-                f"[{label}] ({tag}) "
+                f"[sc{scenario_id}|{network_condition}|{label}] ({tag}) "
                 f"HS={hs_str}  "
                 f"TTFB={row['ttfb_ms']:7.2f}ms  "
                 f"TTLB={row['ttlb_ms']:7.2f}ms  "
@@ -603,7 +620,7 @@ def run_scenario(scenario_id: str, network_condition: str, output_dir: Path) -> 
 
         except Exception as exc:
             import traceback
-            logger.error(f"[{label}] Gagal: {exc}")
+            logger.error(f"[sc{scenario_id}|{network_condition}|{label}] Gagal: {exc}")
             logger.error(traceback.format_exc())
             stop_tshark(tshark_proc)
 
