@@ -587,19 +587,19 @@ def run_scenario(scenario_id: str, network_condition: str, output_dir: Path) -> 
                 "max_rss_kb":       resource_metrics["max_rss_kb"],
             }
 
-            if not is_warmup:
-                results.append(row)
-                hs_str = (f"{row['handshake_ms']:7.2f}ms"
-                          if row['handshake_ms'] is not None else "   n/a   ")
-                logger.info(
-                    f"[{label}] "
-                    f"HS={hs_str}  "
-                    f"TTFB={row['ttfb_ms']:7.2f}ms  "
-                    f"TTLB={row['ttlb_ms']:7.2f}ms  "
-                    f"CPU={row['cpu_pct_time']}  "
-                    f"CPUms={row['cpu_ms']:6.3f}ms  "
-                    f"RAM={row['max_rss_kb']}KB"
-                )
+            results.append(row)
+            hs_str = (f"{row['handshake_ms']:7.2f}ms"
+                      if row['handshake_ms'] is not None else "   n/a   ")
+            tag = "warmup" if is_warmup else " data "
+            logger.info(
+                f"[{label}] ({tag}) "
+                f"HS={hs_str}  "
+                f"TTFB={row['ttfb_ms']:7.2f}ms  "
+                f"TTLB={row['ttlb_ms']:7.2f}ms  "
+                f"CPU={row['cpu_pct_time']}  "
+                f"CPUms={row['cpu_ms']:6.3f}ms  "
+                f"RAM={row['max_rss_kb']}KB"
+            )
 
         except Exception as exc:
             import traceback

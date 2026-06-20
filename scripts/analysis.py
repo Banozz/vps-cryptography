@@ -36,6 +36,16 @@ except ImportError:
     print("       pip3 install pandas numpy scipy")
     sys.exit(1)
 
+# Analisis konvergensi warm-up (modul terpisah; pandas+numpy+matplotlib).
+# Dibungkus opsional agar analysis.py tetap jalan bila matplotlib tak tersedia.
+try:
+    from warmup_convergence import warmup_convergence_analysis
+    _WARMUP_OK = True
+    _WARMUP_ERR = ""
+except Exception as _wu_e:  # pragma: no cover
+    _WARMUP_OK = False
+    _WARMUP_ERR = str(_wu_e)
+
 
 # ─────────────────────────────────────────────────────────
 # Kriteria evaluasi kelayakan (Subbab 3.5)
@@ -70,12 +80,13 @@ def _parse_cpu_pct(val) -> float:
     return float(m.group(1)) if m else np.nan
 
 
-def load_results(results_file: Path) -> pd.DataFrame:
+def load_results(results_file: Path, keep_warmup: bool = False) -> pd.DataFrame:
     df = pd.read_csv(results_file)
 
-    # Buang baris warmup bila ada (benchmark.py terbaru sudah mengeluarkannya,
-    # tapi tetap diproteksi di sini agar kompatibel dengan CSV lama).
-    if "is_warmup" in df.columns:
+    # Buang baris warmup untuk analisis steady-state. benchmark.py terbaru
+    # mencatat SEMUA iterasi, jadi pembuangan dilakukan di sini. Set
+    # keep_warmup=True untuk analisis konvergensi warm-up (butuh baris warm-up).
+    if not keep_warmup and "is_warmup" in df.columns:
         is_wu = df["is_warmup"].astype(str).str.strip().str.lower()
         df = df[~is_wu.isin(["true", "1"])].copy()
 
@@ -422,6 +433,32 @@ def main():
         report["correlation"][network] = correlation_analysis(df, network)
 
     report["feasibility"] = assess_feasibility(df)
+
+    # ── Analisis konvergensi warm-up (opsional; butuh baris warm-up di CSV) ──
+    if _WARMUP_OK:
+        try:
+            df_full = load_results(args.results_file, keep_warmup=True)
+            has_wu = (
+                "is_warmup" in df_full.columns
+                and df_full["is_warmup"].astype(str).str.strip().str.lower()
+                       .isin(["true", "1"]).any()
+            )
+            if has_wu:
+                _wu_report, _wu_path = warmup_convergence_analysis(
+                    df_full, args.output_dir
+                )
+                report["warmup_convergence_json"] = _wu_path
+                report["warmup_convergence_plots"] = _wu_report.get("plots", [])
+                print(f"Analisis konvergensi warm-up tersimpan: {_wu_path}")
+                for _p in _wu_report.get("plots", []):
+                    print(f"  plot: {_p}")
+            else:
+                print("Lewati analisis konvergensi warm-up: CSV tidak memuat baris "
+                      "warm-up (jalankan benchmark.py terbaru yg mencatat semua iterasi).")
+        except Exception as _e:
+            print(f"Analisis konvergensi warm-up dilewati ({_e}).")
+    else:
+        print(f"Analisis konvergensi warm-up dilewati (modul tak tersedia: {_WARMUP_ERR}).")
 
     report_path = args.output_dir / "analysis_report.json"
     with open(report_path, "w") as f:
