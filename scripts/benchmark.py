@@ -54,7 +54,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-WARMUP_ITERATIONS        = int(os.environ.get("WARMUP_ITERS", "20"))
+WARMUP_ITERATIONS        = int(os.environ.get("WARMUP_ITERS", "5"))
 MEASUREMENT_ITERATIONS   = int(os.environ.get("MEASURE_ITERS", "100"))
 SPAWN_OVERHEAD_ITERATIONS = 50
 
@@ -70,16 +70,10 @@ PORT_SCENARIO = {
 
 CAPTURE_INTERFACE = os.environ.get("CAPTURE_IFACE", "eth0")
 CERTS_DIR         = Path(os.environ.get("CERTS_DIR", "/measurement/certs"))
-KEM_GROUPS        = "kyber768:P-256:X25519"
+KEM_GROUPS        = "x25519_kyber768"
 
-# Ukuran minimum PCAP yang dianggap valid (bytes)
-# 384 = PCAP global header kosong di environment ini
 PCAP_MIN_VALID_BYTES = 1000
 
-# Ukuran maksimum TLS close_notify / alert record (bytes).
-# Packet Application Data dari server dengan frame.len <= nilai ini
-# kemungkinan besar adalah close_notify, bukan payload, dan akan dikecualikan
-# dari perhitungan TTLB.
 CLOSE_NOTIFY_MAX_FRAME_LEN = 100
 
 # Batas waktu (detik) untuk SATU iterasi openssl s_client. Mencegah proses
@@ -172,8 +166,6 @@ def start_tshark(port: int, pcap_path: str) -> subprocess.Popen:
     proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     time.sleep(1.0)
 
-    # Deteksi dini: kalau tshark langsung exit (mis. interface tidak valid),
-    # tangkap errornya sekarang sebelum handshake dimulai.
     if proc.poll() is not None:
         stderr_out = proc.stderr.read().decode(errors="ignore").strip()
         raise RuntimeError(f"tshark exit prematur (code {proc.returncode}): {stderr_out}")
@@ -185,10 +177,8 @@ def stop_tshark(proc: subprocess.Popen):
     proc.terminate()
     try:
         _, stderr_data = proc.communicate(timeout=5)
-        # Log stderr tshark kalau ada isi selain pesan "running as root" yang normal
         if stderr_data:
             msg = stderr_data.decode(errors="ignore").strip()
-            # Filter pesan warning standar yang tidak actionable
             non_trivial = [
                 line for line in msg.splitlines()
                 if "Running as user" not in line
@@ -207,16 +197,6 @@ def stop_tshark(proc: subprocess.Popen):
 # ─────────────────────────────────────────────────────────────────────────────
 def _tshark_query(pcap_path: str, display_filter: str, fields: list[str],
                   keylog_path: Optional[str] = None) -> list[list[str]]:
-    """
-    Helper: jalankan tshark -r dengan display filter dan field list tertentu.
-    Jika keylog_path diberikan dan ada, tshark mendekripsi TLS 1.3 memakai
-    session keys di file tsb (-o tls.keylog_file:...), sehingga record
-    handshake terenkripsi (mis. Finished = type 20) dan Application Data
-    sejati bisa DIBEDAKAN. Tanpa keylog, semua record terenkripsi (termasuk
-    Certificate/CertificateVerify/Finished server) tampak sebagai
-    Application Data (content_type 23).
-    Kembalikan list of rows (setiap row adalah list of field values).
-    """
     cmd = ["tshark", "-r", pcap_path]
     if keylog_path and os.path.exists(keylog_path):
         cmd += ["-o", f"tls.keylog_file:{keylog_path}"]
@@ -236,25 +216,6 @@ def parse_metrics_from_pcap(
     server_port: int,
     keylog_path: Optional[str] = None,
 ) -> Optional[dict]:
-    """
-    Parsing dua metrik waktu dari PCAP menggunakan referensi waktu yang seragam.
-
-    Referensi t=0: frame.time_epoch dari ClientHello PERTAMA (min dari semua
-    ClientHello yang ditemukan di port tujuan). Menggunakan min() menangani
-    Hello Retry Request dengan benar — HRR menyebabkan dua ClientHello,
-    dan kita ingin mengukur dari inisiasi koneksi pertama.
-
-    TTFB (Time-To-First-Byte):
-        t=0 → timestamp Application Data PERTAMA dari server.
-        Filter: tls.app_data + tcp.srcport == server_port.
-        Dikecualikan paket dengan frame.len <= CLOSE_NOTIFY_MAX_FRAME_LEN.
-
-    TTLB (Time-To-Last-Byte):
-        t=0 → timestamp Application Data TERAKHIR dari server sebelum close_notify.
-        Filter sama dengan TTFB, diambil nilai max dari timestamps yang tersaring.
-
-    Return dict dengan kunci ttfb_s dan ttlb_s, atau None jika gagal.
-    """
     try:
         pcap_size = os.path.getsize(pcap_path)
         if pcap_size < PCAP_MIN_VALID_BYTES:
@@ -277,10 +238,6 @@ def parse_metrics_from_pcap(
         t_ref = min(ch_times)   # t=0, pakai ClientHello pertama (handle HRR)
 
         # ── Handshake Time: ClientHello[0] → server Finished (type 20) ───────
-        # CATATAN PENTING: tls.handshake.type == 20 HANYA terekspos jika PCAP
-        # didekripsi (keylog tersedia). Tanpa keylog, Finished server ikut
-        # terbungkus sebagai Application Data (content_type 23) sehingga tidak
-        # bisa difilter → handshake_s = None.
         handshake_s = None
         t_finished_abs = None
         fin_frame_number = None
@@ -301,8 +258,6 @@ def parse_metrics_from_pcap(
             handshake_s = t_finished_abs - t_ref
 
         # ── Application Data dari server (TTFB & TTLB) ───────────────────────
-        # tls.app_data = filter tshark untuk Application Data record (konten terenkripsi)
-        # Kita tambahkan frame.len agar bisa menyaring close_notify (frame kecil)
         app_rows = _tshark_query(
             pcap_path,
             f"tls.app_data and tcp.srcport == {server_port}",
@@ -310,7 +265,6 @@ def parse_metrics_from_pcap(
             keylog_path,
         )
 
-        # Saring close_notify: buang paket dengan frame.len <= CLOSE_NOTIFY_MAX_FRAME_LEN
         app_payload_times = []
         for row in app_rows:
             if len(row) < 2:
@@ -328,24 +282,9 @@ def parse_metrics_from_pcap(
             return None
 
         # ── TTLB: Time-To-Last-Byte ─────────────────────────────────────
-        # Pada PCAP terdekripsi, tls.app_data hanya cocok dengan Application Data
-        # SEJATI (record handshake jadi tls.handshake, close_notify jadi tls.alert).
-        # Field tls.app_data hanya muncul di frame tempat TCP reassembly record
-        # TLS SELESAI → timestamp-nya = byte TERAKHIR record tiba. max() = byte
-        # terakhir seluruh respons. Inilah TTLB.
         ttlb_s = max(app_payload_times) - t_ref
 
         # ── TTFB: Time-To-First-Byte ─────────────────────────────────
-        # KENAPA TIDAK pakai tls.app_data: jika server mengirim seluruh payload
-        # sebagai SATU record TLS, hanya ADA SATU frame tls.app_data (di titik
-        # TCP reassembly selesai) → min()==max() → TTFB==TTLB. Itu keliru.
-        # Yang benar: byte pertama = TCP segment pertama BERMUATAN (tcp.len > 0)
-        # dari server yang tiba SETELAH server Finished. Disaring via frame.number
-        # > nomor frame Finished agar flight handshake (yang juga tcp.len>0) dan
-        # frame Finished itu sendiri tidak ikut terhitung. (Perbandingan epoch
-        # ber-:.9f rawan membatalkan filter > pada batas, jadi pakai frame.number.) Segment ini boleh jadi masih "TCP segment of a
-        # reassembled PDU" (belum lengkap sebagai record TLS), tapi timestamp-nya
-        # tetap sah sebagai "byte pertama respons tiba".
         ttfb_s = None
         if fin_frame_number is not None:
             seg_rows = _tshark_query(
@@ -359,9 +298,6 @@ def parse_metrics_from_pcap(
             if seg_times:
                 ttfb_s = min(seg_times) - t_ref
         if ttfb_s is None:
-            # Fallback (mis. tanpa keylog → t_finished tak diketahui): pakai frame
-            # tls.app_data paling awal. CATATAN: bisa salah ukur (proxy handshake
-            # atau identik dengan TTLB). Hanya agar pipeline tidak gagal.
             logger.warning("TTFB fallback ke min(tls.app_data) — hasil mungkin tidak akurat.")
             ttfb_s = min(app_payload_times) - t_ref
 
@@ -415,14 +351,6 @@ def _parse_usr_time_output(stderr_text: str) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 def run_single_handshake(scenario_id: str, server_host: str, server_port: int,
                          keylog_path: Optional[str] = None) -> dict:
-    """
-    Menjalankan satu iterasi openssl s_client dan mengumpulkan resource metrics
-    via /usr/bin/time -v.
-
-    Metrik waktu (ttfb_s, ttlb_s) TIDAK dihitung di sini — semuanya dihitung
-    dari PCAP oleh parse_metrics_from_pcap() untuk memastikan referensi waktu
-    yang seragam.
-    """
     sc          = SCENARIOS[scenario_id]
     get_request = (
         f"GET /{PAYLOAD_FILENAME} HTTP/1.0\r\n"
@@ -443,13 +371,10 @@ def run_single_handshake(scenario_id: str, server_host: str, server_port: int,
         "-ign_eof",
         "-brief",
     ]
-    # Tulis TLS 1.3 session keys ke file agar PCAP bisa didekripsi tshark.
-    # Diverifikasi: OpenSSL 3.2.2 s_client mendukung opsi -keylogfile.
+
     if keylog_path:
         openssl_cmd += ["-keylogfile", keylog_path]
 
-    # Cek ketersediaan /usr/bin/time -v (dilakukan sekali, di-cache bisa
-    # ditambahkan nanti jika performa menjadi concern)
     time_bin = "/usr/bin/time"
     has_usr_time = False
     try:
@@ -467,10 +392,6 @@ def run_single_handshake(scenario_id: str, server_host: str, server_port: int,
         full_cmd = openssl_cmd
         logger.warning("/usr/bin/time -v tidak tersedia — resource metrics tidak akan tersedia.")
 
-    # Snapshot CPU child sebelum menjalankan handshake (presisi mikrodetik).
-    # Handshake berjalan SERIAL & tiap child di-wait, sehingga delta before/after
-    # mengisolasi CPU iterasi ini. tshark di-reap di luar jendela ini (di run_scenario),
-    # jadi tidak ikut terhitung.
     rusage_before = resource.getrusage(resource.RUSAGE_CHILDREN)
     proc = subprocess.Popen(
         full_cmd,
@@ -479,12 +400,6 @@ def run_single_handshake(scenario_id: str, server_host: str, server_port: int,
         stderr=subprocess.PIPE,
     )
 
-    # communicate() menulis stdin lalu membaca stdout+stderr SECARA BERSAMAAN
-    # (mencegah deadlock pipe) DAN menerapkan timeout wall-clock. Tanpa timeout,
-    # 'proc.stdout.read()' menggantung selamanya bila openssl s_client tidak
-    # pernah keluar — terjadi saat FIN/close_notify server hilang akibat packet
-    # loss (kondisi edge), apalagi dengan flag -ign_eof yang membuat s_client
-    # menunggu server menutup koneksi.
     try:
         stdout_data, stderr_data = proc.communicate(
             input=get_request, timeout=HANDSHAKE_TIMEOUT_S
