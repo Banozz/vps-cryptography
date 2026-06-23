@@ -334,6 +334,13 @@ def _format_units(metric: str, value: float) -> str:
     return str(value)
 
 
+def _boxplot_with_labels(ax, data, labels):
+    try:
+        return ax.boxplot(data, tick_labels=labels, showfliers=False)
+    except TypeError:
+        return ax.boxplot(data, labels=labels, showfliers=False)
+
+
 def plot_metric_boxplots(df: pd.DataFrame, metric: str, outpath: Path) -> str:
     """
     Boxplot per metrik dengan 2 panel:
@@ -354,7 +361,7 @@ def plot_metric_boxplots(df: pd.DataFrame, metric: str, outpath: Path) -> str:
             data.append(vals.tolist() if len(vals) else [np.nan])
             labels.append(sc)
 
-        ax.boxplot(data, labels=labels, showfliers=False)
+        _boxplot_with_labels(ax, data, labels)
         ax.set_title(NETWORK_LABEL.get(network, network))
         ax.set_xlabel("Skenario")
         ax.set_ylabel(title)
@@ -383,7 +390,7 @@ def plot_cpu_pct_ideal(df: pd.DataFrame, outpath: Path) -> str:
         data.append(vals)
         labels.append(sc)
 
-    ax.boxplot(data, labels=labels, showfliers=False)
+    _boxplot_with_labels(ax, data, labels)
     ax.set_title("CPU Utilization (%) — Jaringan Ideal")
     ax.set_xlabel("Skenario")
     ax.set_ylabel("CPU Util (%)")
