@@ -17,7 +17,8 @@ Perubahan skema kolom CSV vs versi lama:
 [W7] Correlation check Pearson Handshake<->TTFB (sanity-check isolasi variabel).
 
 Output:
-  - analysis_report.json   : Statistik deskriptif + Wilcoxon + korelasi
+  - analysis/analysis_report.json : Statistik deskriptif + Wilcoxon + korelasi
+  - plots/*.png                   : Grafik perbandingan antar skenario
   - (ringkasan dicetak ke terminal)
 """
 
@@ -36,8 +37,20 @@ except ImportError:
     print("       pip3 install pandas numpy scipy")
     sys.exit(1)
 
+# Matplotlib dipakai untuk output grafik. Wajib tersedia di Docker image,
+# tetapi tetap dibuat defensif agar script tidak crash di environment lain.
+try:
+    import matplotlib
+    matplotlib.use("Agg")  # headless / Docker-friendly
+    import matplotlib.pyplot as plt
+except Exception as _mpl_e:  # pragma: no cover
+    plt = None
+    _MPL_ERR = str(_mpl_e)
+else:
+    _MPL_ERR = ""
+
 # Analisis konvergensi warm-up (modul terpisah; pandas+numpy+matplotlib).
-# Dibungkus opsional agar analysis.py tetap jalan bila matplotlib tak tersedia.
+# Dibungkus opsional agar analysis.py tetap jalan bila modul tak tersedia.
 try:
     from warmup_convergence import warmup_convergence_analysis
     _WARMUP_OK = True
@@ -67,6 +80,8 @@ NETWORK_LABEL = {
     "ideal": "Ideal (<1ms, 0% loss)",
     "edge":  "Edge (100ms, 1% loss)",
 }
+
+SCENARIO_ORDER = ["A", "B", "C"]
 
 
 # ─────────────────────────────────────────────────────────
@@ -103,8 +118,7 @@ def load_results(results_file: Path, keep_warmup: bool = False) -> pd.DataFrame:
 
     # cpu_ms = metrik biaya komputasi PRIMER (absolut, invarian thd delay jaringan).
     # Utamakan kolom cpu_ms dari CSV benchmark.py terbaru (getrusage, presisi us).
-    # Bila tidak ada (CSV lama), turunkan dari cpu_usr_s+cpu_sys_s (resolusi 10ms,
-    # bisa terkuantisasi ke 0 untuk kerja sub-10ms -- pakai CSV terbaru bila bisa).
+    # Bila tidak ada (CSV lama), turunkan dari cpu_usr_s+cpu_sys_s.
     if "cpu_ms" not in df.columns and "cpu_total_s" in df.columns:
         df["cpu_ms"] = df["cpu_total_s"] * 1000.0
     if "cpu_ms" in df.columns:
@@ -167,12 +181,18 @@ def wilcoxon_ranksum(a: pd.Series, b: pd.Series) -> dict:
     }
 
 
+def _network_sorted_unique(df: pd.DataFrame) -> list[str]:
+    order = [n for n in ["ideal", "edge"] if n in set(df["network"].dropna().astype(str))]
+    extras = [n for n in sorted(df["network"].dropna().astype(str).unique()) if n not in order]
+    return order + extras
+
+
 # ─────────────────────────────────────────────────────────
 # Analisis per-metrik per-jaringan
 # ─────────────────────────────────────────────────────────
 def analyze_metric(df: pd.DataFrame, metric: str, network: str) -> dict:
     result = {}
-    for sc in ["A", "B", "C"]:
+    for sc in SCENARIO_ORDER:
         subset = df[(df["scenario"] == sc) & (df["network"] == network)][metric]
         result[f"scenario_{sc}"] = descriptive_stats(subset)
 
@@ -201,7 +221,7 @@ def correlation_analysis(df: pd.DataFrame, network: str) -> dict:
     if "handshake_ms" not in df.columns or "ttfb_ms" not in df.columns:
         return {"error": "Kolom handshake_ms/ttfb_ms tidak tersedia"}
 
-    for sc in ["A", "B", "C"]:
+    for sc in SCENARIO_ORDER:
         sub = df[(df["scenario"] == sc) & (df["network"] == network)]
         pair = sub[["handshake_ms", "ttfb_ms"]].dropna()
         entry = {"n": int(len(pair))}
@@ -278,7 +298,11 @@ def assess_feasibility(df: pd.DataFrame) -> dict:
         "cpu_ms_median_A_ideal": float(cpu_ms_a) if pd.notna(cpu_ms_a) else None,
         "cpu_ms_median_C_ideal": float(cpu_ms_c) if pd.notna(cpu_ms_c) else None,
         "cpu_ms_overhead_pct_ideal": float(cpu_ms_ovh),
-        "cpu_note": 'Metrik CPU primer = cpu_ms (waktu CPU absolut via getrusage, invarian thd jaringan). cpu_pct (utilisasi %) hanya valid pada kondisi ideal; P95-nya dipakai sebagai proksi peak utk kriteria 3.5.',
+        "cpu_note": (
+            "Metrik CPU primer = cpu_ms (waktu CPU absolut via getrusage, "
+            "invarian thd jaringan). cpu_pct (utilisasi %) hanya valid pada "
+            "kondisi ideal; P95-nya dipakai sebagai proksi peak utk kriteria 3.5."
+        ),
         "threshold_latency_pct": THRESHOLD_LATENCY_OVERHEAD_PCT,
         "threshold_cpu_pct": THRESHOLD_CPU_PEAK_PCT,
         "criterion_handshake_passed": feas_hs,
@@ -286,6 +310,185 @@ def assess_feasibility(df: pd.DataFrame) -> dict:
         "criterion_cpu_passed": feas_cpu,
         "overall_feasible": overall,
     }
+
+
+# ─────────────────────────────────────────────────────────
+# Visualisasi
+# ─────────────────────────────────────────────────────────
+def _require_matplotlib() -> None:
+    if plt is None:
+        raise RuntimeError(f"Matplotlib tidak tersedia: {_MPL_ERR}")
+
+
+def _format_units(metric: str, value: float) -> str:
+    if value is None or (isinstance(value, float) and np.isnan(value)):
+        return "N/A"
+    _, _, unit = METRICS_CONFIG[metric]
+    if unit == "ms":
+        return f"{value:.2f} ms"
+    if unit == "kb":
+        return f"{value:.1f} KB"
+    if unit == "pct":
+        return f"{value:.1f}%"
+    return str(value)
+
+
+def plot_metric_boxplots(df: pd.DataFrame, metric: str, outpath: Path) -> str:
+    """
+    Boxplot per metrik dengan 2 panel:
+      - kiri: ideal
+      - kanan: edge
+    Setiap panel berisi skenario A/B/C.
+    """
+    _require_matplotlib()
+
+    title, short, unit = METRICS_CONFIG[metric]
+    fig, axes = plt.subplots(1, 2, figsize=(13, 5), sharey=True)
+
+    for ax, network in zip(axes, ["ideal", "edge"]):
+        data = []
+        labels = []
+        for sc in SCENARIO_ORDER:
+            vals = df[(df["network"] == network) & (df["scenario"] == sc)][metric].dropna()
+            data.append(vals.tolist() if len(vals) else [np.nan])
+            labels.append(sc)
+
+        ax.boxplot(data, labels=labels, showfliers=False)
+        ax.set_title(NETWORK_LABEL.get(network, network))
+        ax.set_xlabel("Skenario")
+        ax.set_ylabel(title)
+        ax.grid(True, alpha=0.25)
+
+    fig.suptitle(f"{title} per Skenario dan Jaringan")
+    fig.tight_layout()
+    fig.savefig(outpath, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    return str(outpath)
+
+
+def plot_cpu_pct_ideal(df: pd.DataFrame, outpath: Path) -> str:
+    """CPU utilitas hanya relevan pada jaringan ideal sesuai Bab III."""
+    _require_matplotlib()
+
+    metric = "cpu_pct"
+    fig, ax = plt.subplots(figsize=(7, 5))
+
+    data = []
+    labels = []
+    for sc in SCENARIO_ORDER:
+        vals = df[(df["network"] == "ideal") & (df["scenario"] == sc)][metric].dropna()
+        if len(vals) == 0:
+            vals = pd.Series(dtype=float)
+        data.append(vals)
+        labels.append(sc)
+
+    ax.boxplot(data, labels=labels, showfliers=False)
+    ax.set_title("CPU Utilization (%) — Jaringan Ideal")
+    ax.set_xlabel("Skenario")
+    ax.set_ylabel("CPU Util (%)")
+    ax.grid(True, alpha=0.25)
+
+    fig.tight_layout()
+    fig.savefig(outpath, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    return str(outpath)
+
+
+def plot_overhead_c_vs_a(report: dict, outpath: Path) -> str:
+    """Bar chart overhead median C vs A pada jaringan ideal."""
+    _require_matplotlib()
+
+    metrics = ["handshake_ms", "ttfb_ms", "ttlb_ms", "cpu_ms", "max_rss_kb"]
+    labels = [METRICS_CONFIG[m][1] for m in metrics]
+
+    values = []
+    for metric in metrics:
+        block = report.get("metrics", {}).get("ideal", {}).get(metric, {})
+        wc = block.get("wilcoxon_A_vs_C", {})
+        values.append(wc.get("overhead_pct", float("nan")))
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    x = np.arange(len(labels))
+    bars = ax.bar(x, values)
+    ax.axhline(0, linewidth=1)
+    ax.axhline(THRESHOLD_LATENCY_OVERHEAD_PCT, linestyle="--", linewidth=1)
+    ax.set_title("Overhead Median Skenario C terhadap A — Jaringan Ideal")
+    ax.set_ylabel("Overhead (%)")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=20, ha="right")
+    ax.grid(True, axis="y", alpha=0.25)
+
+    for bar, val in zip(bars, values):
+        if val == val:  # NaN check
+            ax.annotate(
+                f"{val:+.1f}%",
+                (bar.get_x() + bar.get_width() / 2, bar.get_height()),
+                textcoords="offset points",
+                xytext=(0, 4),
+                ha="center",
+                fontsize=9,
+            )
+
+    fig.tight_layout()
+    fig.savefig(outpath, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    return str(outpath)
+
+
+def plot_handshake_ttfb_scatter(df: pd.DataFrame, network: str, outpath: Path) -> str:
+    """Scatter handshake vs TTFB per skenario untuk sanity check visual."""
+    _require_matplotlib()
+
+    fig, ax = plt.subplots(figsize=(7, 5))
+    for sc in SCENARIO_ORDER:
+        sub = df[(df["network"] == network) & (df["scenario"] == sc)][["handshake_ms", "ttfb_ms"]].dropna()
+        if len(sub) == 0:
+            continue
+        ax.scatter(sub["handshake_ms"], sub["ttfb_ms"], s=18, alpha=0.7, label=f"Skenario {sc}")
+
+    ax.set_title(f"Handshake vs TTFB — {NETWORK_LABEL.get(network, network)}")
+    ax.set_xlabel("Handshake Time (ms)")
+    ax.set_ylabel("TTFB (ms)")
+    ax.grid(True, alpha=0.25)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(outpath, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    return str(outpath)
+
+
+def generate_plots(df: pd.DataFrame, report: dict, plots_dir: Path) -> list[str]:
+    if plt is None:
+        print(f"Analisis grafik dilewati (matplotlib tak tersedia: {_MPL_ERR})")
+        return []
+
+    plots_dir.mkdir(parents=True, exist_ok=True)
+    generated: list[str] = []
+
+    # Grafik utama per metrik
+    for metric in ["handshake_ms", "ttfb_ms", "ttlb_ms", "cpu_ms", "max_rss_kb"]:
+        if metric in df.columns:
+            title, _, _ = METRICS_CONFIG[metric]
+            outpath = plots_dir / f"{metric}_boxplot.png"
+            generated.append(plot_metric_boxplots(df, metric, outpath))
+
+    # CPU utilitas hanya untuk jaringan ideal
+    if "cpu_pct" in df.columns:
+        generated.append(plot_cpu_pct_ideal(df, plots_dir / "cpu_pct_ideal_boxplot.png"))
+
+    # Ringkasan overhead utama
+    generated.append(plot_overhead_c_vs_a(report, plots_dir / "overhead_c_vs_a_ideal.png"))
+
+    # Scatter sanity-check hubungan handshake/ttfb
+    if "handshake_ms" in df.columns and "ttfb_ms" in df.columns:
+        for network in _network_sorted_unique(df):
+            generated.append(
+                plot_handshake_ttfb_scatter(
+                    df, network, plots_dir / f"handshake_ttfb_scatter_{network}.png"
+                )
+            )
+
+    return generated
 
 
 # ─────────────────────────────────────────────────────────
@@ -396,10 +599,24 @@ def main():
     parser = argparse.ArgumentParser(
         description="Analisis statistik hasil benchmark PQC TLS 1.3 [W6/W7]"
     )
-    parser.add_argument("--results-file", type=Path, required=True,
-                        help="Path ke CSV hasil benchmark (results_combined_*.csv)")
-    parser.add_argument("--output-dir", type=Path, default=Path("/measurement/results"),
-                        help="Direktori output laporan")
+    parser.add_argument(
+        "--results-file",
+        type=Path,
+        required=True,
+        help="Path ke CSV hasil benchmark (results_combined_*.csv)",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("/measurement/results/analysis"),
+        help="Direktori output laporan JSON (default: /measurement/results/analysis)",
+    )
+    parser.add_argument(
+        "--plots-dir",
+        type=Path,
+        default=None,
+        help="Direktori output grafik. Default: sibling folder 'plots' di bawah results",
+    )
     args = parser.parse_args()
 
     if not args.results_file.exists():
@@ -407,6 +624,8 @@ def main():
         sys.exit(1)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
+    plots_dir = args.plots_dir or args.output_dir.parent / "plots"
+    plots_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Memuat data dari: {args.results_file}")
     df = load_results(args.results_file)
@@ -421,9 +640,10 @@ def main():
         "metrics": {},
         "correlation": {},
         "feasibility": {},
+        "plots": [],
     }
 
-    networks = df["network"].unique().tolist()
+    networks = _network_sorted_unique(df)
     metrics = [m for m in METRICS_CONFIG if m in df.columns]
 
     for network in networks:
@@ -434,6 +654,16 @@ def main():
 
     report["feasibility"] = assess_feasibility(df)
 
+    # ── Analisis grafik ──
+    try:
+        report["plots"] = generate_plots(df, report, plots_dir)
+        if report["plots"]:
+            print(f"Grafik tersimpan di: {plots_dir}")
+            for p in report["plots"]:
+                print(f"  plot: {p}")
+    except Exception as _plot_e:
+        print(f"Analisis grafik dilewati ({_plot_e}).")
+
     # ── Analisis konvergensi warm-up (opsional; butuh baris warm-up di CSV) ──
     if _WARMUP_OK:
         try:
@@ -441,7 +671,7 @@ def main():
             has_wu = (
                 "is_warmup" in df_full.columns
                 and df_full["is_warmup"].astype(str).str.strip().str.lower()
-                       .isin(["true", "1"]).any()
+                .isin(["true", "1"]).any()
             )
             if has_wu:
                 _wu_report, _wu_path = warmup_convergence_analysis(
@@ -453,15 +683,17 @@ def main():
                 for _p in _wu_report.get("plots", []):
                     print(f"  plot: {_p}")
             else:
-                print("Lewati analisis konvergensi warm-up: CSV tidak memuat baris "
-                      "warm-up (jalankan benchmark.py terbaru yg mencatat semua iterasi).")
+                print(
+                    "Lewati analisis konvergensi warm-up: CSV tidak memuat baris "
+                    "warm-up (jalankan benchmark.py terbaru yg mencatat semua iterasi)."
+                )
         except Exception as _e:
             print(f"Analisis konvergensi warm-up dilewati ({_e}).")
     else:
         print(f"Analisis konvergensi warm-up dilewati (modul tak tersedia: {_WARMUP_ERR}).")
 
     report_path = args.output_dir / "analysis_report.json"
-    with open(report_path, "w") as f:
+    with open(report_path, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2, default=str)
     print(f"Laporan JSON tersimpan: {report_path}")
 

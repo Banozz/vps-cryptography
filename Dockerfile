@@ -10,6 +10,9 @@ FROM fedora:40
 LABEL maintainer="thesis-research"
 LABEL description="TLS Hybrid Signature Client — Fedora 40"
 
+ENV PYTHONUNBUFFERED=1
+ENV MPLBACKEND=Agg
+
 # Install dependensi sistem menggunakan DNF (Fedora)
 RUN dnf install -y \
         gcc gcc-c++ cmake ninja-build make \
@@ -66,7 +69,8 @@ RUN rm -rf /tmp/liboqs /tmp/oqs-provider
 
 # Install Python dependencies (Python 3.12 sangat aman untuk dependensi data science)
 COPY setup/scripts/requirements.txt /tmp/requirements.txt
-RUN pip3 install --break-system-packages --no-cache-dir -r /tmp/requirements.txt
+RUN pip3 install --break-system-packages --no-cache-dir -r /tmp/requirements.txt \
+    && pip3 install --break-system-packages --no-cache-dir matplotlib
 
 # Menyalin berkas konfigurasi OpenSSL bawaan host
 COPY setup/config/openssl-oqs.cnf /etc/ssl/openssl-oqs.cnf
@@ -79,6 +83,9 @@ RUN OSSL_MOD_DIR=$(openssl version -a | grep MODULESDIR | cut -d'"' -f2) \
 
 # Berikan hak akses dumpcap agar tshark bisa menyadap paket tanpa root
 RUN chmod +x /usr/sbin/dumpcap 2>/dev/null || chmod +x /usr/bin/dumpcap 2>/dev/null || true
+
+# Siapkan folder hasil agar output analysis/plots bisa ditaruh bersebelahan di bawah /measurement/results
+RUN mkdir -p /measurement/results/analysis /measurement/results/plots
 
 # Validasi muatan provider
 RUN openssl list -providers | grep -q "oqsprovider" \
