@@ -24,6 +24,7 @@ Output:
 
 import argparse
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -624,7 +625,12 @@ def main():
         sys.exit(1)
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
-    plots_dir = args.plots_dir or args.output_dir.parent / "plots"
+    plots_dir = args.plots_dir or Path(
+        os.getenv(
+            "PLOTS_DIR",
+            str(args.output_dir.parent / "plots"),
+        )
+    )
     plots_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Memuat data dari: {args.results_file}")

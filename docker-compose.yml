@@ -73,6 +73,9 @@ services:
     environment:
       - RESULTS_DIR=/measurement/results
       - OPENSSL_CONF=/etc/ssl/openssl-oqs.cnf
+      - RESULTS_DIR=/measurement/results
+      - ANALYSIS_DIR=/measurement/results/analysis
+      - PLOTS_DIR=/measurement/results/plots
 
     # REVISI: Diarahkan ke analysis.py dengan parameter file gabungan terbaru
     command: >
