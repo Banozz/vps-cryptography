@@ -43,7 +43,7 @@ services:
       - RESULTS_DIR=/measurement/results
       - OPENSSL_CONF=/etc/ssl/openssl-oqs.cnf
       - SCENARIOS=${SCENARIOS:-A,B,C}
-      - NETWORKS=${NETWORKS:-ideal,edge}
+      - NETWORKS=${NETWORKS:-ideal,edge_loss0,edge,edge_loss3}
 
     # Menjalankan script orkestrasi yang memanggil benchmark.py
     command: bash /measurement/scripts/run_experiments.sh

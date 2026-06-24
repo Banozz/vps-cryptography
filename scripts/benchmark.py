@@ -93,7 +93,9 @@ SCENARIOS = {
 
 NETWORK_CONDITIONS = {
     "ideal": {"description": "Ideal (<1ms, 0% loss)", "delay_ms": 0,   "loss_pct": 0.0},
+    "edge_loss0": {"description": "Edge 100ms, 0% loss", "delay_ms": 100, "loss_pct": 0.0},
     "edge":  {"description": "Edge (100ms, 1% loss)", "delay_ms": 100, "loss_pct": 1.0},
+    "edge_loss3": {"description": "Edge 100ms, 3% loss", "delay_ms": 100, "loss_pct": 3.0},
 }
 
 
@@ -124,23 +126,29 @@ def configure_netem(condition: str, interface: str = CAPTURE_INTERFACE):
         if condition != "ideal":
             logger.warning(f"[netem] 'tc' tidak ditemukan. Melewati konfigurasi '{condition}'.")
         return
-    params = NETWORK_CONDITIONS[condition]
+    params   = NETWORK_CONDITIONS[condition]
+    delay_ms = params.get("delay_ms", 0)
+    loss_pct = params.get("loss_pct", 0.0)
     subprocess.run([tc_path, "qdisc", "del", "dev", interface, "root"], capture_output=True)
-    if condition == "ideal":
-        logger.info("[netem] Kondisi ideal — tidak ada delay/loss diterapkan")
+
+    # Tanpa impairment (delay & loss = 0) -> biarkan link apa adanya.
+    if delay_ms == 0 and loss_pct == 0:
+        logger.info(f"[netem] Kondisi '{condition}' tanpa delay/loss — link dibiarkan apa adanya")
         return
-    cmd = [
-        tc_path, "qdisc", "add", "dev", interface, "root", "netem",
-        "delay", f"{params['delay_ms']}ms",
-        "loss",  f"{params['loss_pct']}%",
-    ]
+
+    cmd = [tc_path, "qdisc", "add", "dev", interface, "root", "netem"]
+    if delay_ms > 0:
+        cmd += ["delay", f"{delay_ms}ms"]
+    if loss_pct > 0:
+        cmd += ["loss", f"{loss_pct}%"]
+
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.returncode != 0:
         logger.error(f"tc netem gagal: {result.stderr.strip()}")
     else:
         logger.info(
-            f"[netem] Diterapkan: delay={params['delay_ms']}ms "
-            f"loss={params['loss_pct']}% pada {interface}"
+            f"[netem] Diterapkan pada '{condition}': delay={delay_ms}ms "
+            f"loss={loss_pct}% pada {interface}"
         )
 
 
@@ -563,8 +571,13 @@ def main():
     parser = argparse.ArgumentParser(
         description="PQC TLS 1.3 Benchmark — Hybrid Signature Thesis"
     )
-    parser.add_argument("--scenarios",           nargs="+", default=["A", "B", "C"])
-    parser.add_argument("--networks",            nargs="+", default=["ideal", "edge"])
+    parser.add_argument(
+        "--scenarios", nargs="+", 
+        default=["A", "B", "C"])
+    parser.add_argument(
+        "--networks", nargs="+",
+        default=["ideal", "edge_loss0", "edge", "edge_loss3"],
+    )
     parser.add_argument("--output-dir",          type=Path, default=Path("/measurement/results"))
     parser.add_argument("--skip-spawn-overhead", action="store_true")
     args = parser.parse_args()

@@ -78,11 +78,19 @@ METRICS_CONFIG = {
 }
 
 NETWORK_LABEL = {
-    "ideal": "Ideal (<1ms, 0% loss)",
-    "edge":  "Edge (100ms, 1% loss)",
+    "ideal":      "Ideal (<1ms, 0% loss)",
+    "edge_loss0": "Edge (100ms, 0% loss)",
+    "edge":       "Edge (100ms, 1% loss)",
+    "edge_loss3": "Edge (100ms, 3% loss)",
 }
 
 SCENARIO_ORDER = ["A", "B", "C"]
+
+# Urutan tampil jaringan: 'ideal' lalu sweep loss Edge (Tier 1.A) terurut by loss.
+NETWORK_ORDER = ["ideal", "edge_loss0", "edge", "edge_loss3"]
+
+# Peta loss% per blok Edge untuk tren Tier 1.A. 'edge' = titik 1% kanonik.
+EDGE_LOSS_PCT = {"edge_loss0": 0.0, "edge": 1.0, "edge_loss3": 3.0}
 
 
 # ─────────────────────────────────────────────────────────
@@ -183,8 +191,17 @@ def wilcoxon_ranksum(a: pd.Series, b: pd.Series) -> dict:
 
 
 def _network_sorted_unique(df: pd.DataFrame) -> list[str]:
-    order = [n for n in ["ideal", "edge"] if n in set(df["network"].dropna().astype(str))]
-    extras = [n for n in sorted(df["network"].dropna().astype(str).unique()) if n not in order]
+    present = set(df["network"].dropna().astype(str))
+    order = [n for n in NETWORK_ORDER if n in present]
+    extras = [n for n in sorted(present) if n not in order]
+    return order + extras
+
+
+def _ordered_report_networks(report: dict) -> list[str]:
+    """Urutkan kunci jaringan pada report sesuai NETWORK_ORDER (extras di akhir)."""
+    present = list(report.get("metrics", {}).keys())
+    order = [n for n in NETWORK_ORDER if n in present]
+    extras = [n for n in present if n not in order]
     return order + extras
 
 
@@ -247,6 +264,46 @@ def correlation_analysis(df: pd.DataFrame, network: str) -> dict:
                     entry["pearson_procleg_cpu_p"] = float(pc)
         out[f"scenario_{sc}"] = entry
     return out
+
+
+# ─────────────────────────────────────────────────────────
+# [Tier 1.A] Tren gap C vs A pada Edge seiring kenaikan packet loss
+# ─────────────────────────────────────────────────────────
+def tier1a_loss_trend(report: dict) -> dict:
+    """
+    Rangkum bagaimana gap Skenario C vs A pada Edge MELEBAR saat loss naik.
+
+    Hanya membaca blok 'edge*' yang ada di report['metrics'] (0/1/3%); tidak
+    menyentuh kondisi 'ideal'. Konsisten dengan guardrail: loss = blok Edge
+    terpisah, tiap titik tetap dianalisis per tipe sertifikat (A/B/C).
+    """
+    metrics_block = report.get("metrics", {})
+    loss_nets = [(n, EDGE_LOSS_PCT[n]) for n in EDGE_LOSS_PCT if n in metrics_block]
+    loss_nets.sort(key=lambda x: x[1])
+    if len(loss_nets) < 2:
+        return {"available": False, "reason": "Butuh >=2 titik loss Edge (mis. edge_loss0 + edge)."}
+
+    trend = {
+        "available": True,
+        "loss_points_pct": [p for _, p in loss_nets],
+        "networks": [n for n, _ in loss_nets],
+        "metrics": {},
+    }
+    for metric in ("handshake_ms", "ttfb_ms", "ttlb_ms", "cpu_ms"):
+        series = []
+        for net, loss in loss_nets:
+            block = metrics_block.get(net, {}).get(metric, {})
+            wc = block.get("wilcoxon_A_vs_C", {})
+            series.append({
+                "network": net,
+                "loss_pct": loss,
+                "median_A": block.get("scenario_A", {}).get("median"),
+                "median_C": block.get("scenario_C", {}).get("median"),
+                "overhead_C_vs_A_pct": wc.get("overhead_pct"),
+                "significant": wc.get("significant"),
+            })
+        trend["metrics"][metric] = series
+    return trend
 
 
 # ─────────────────────────────────────────────────────────
@@ -474,6 +531,47 @@ def plot_overhead_c_vs_a(report: dict, outpath: Path) -> str:
     return str(outpath)
 
 
+def plot_tier1a_overhead_vs_loss(report: dict, outpath: Path):
+    """[Tier 1.A] Plot overhead median C vs A pada Edge sebagai fungsi packet loss.
+
+    Mengembalikan path PNG, atau None bila titik loss < 2 (plot dilewati).
+    """
+    _require_matplotlib()
+    trend = report.get("tier1a_loss_trend", {})
+    if not trend.get("available"):
+        return None
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    plotted = False
+    for metric in ("handshake_ms", "ttlb_ms", "ttfb_ms"):
+        series = trend.get("metrics", {}).get(metric, [])
+        xs, ys = [], []
+        for pt in series:
+            ov = pt.get("overhead_C_vs_A_pct")
+            if isinstance(ov, (int, float)) and ov == ov:  # bukan None / NaN
+                xs.append(pt["loss_pct"])
+                ys.append(ov)
+        if len(xs) >= 2:
+            ax.plot(xs, ys, marker="o", label=METRICS_CONFIG[metric][1])
+            plotted = True
+
+    if not plotted:
+        plt.close(fig)
+        return None
+
+    ax.axhline(THRESHOLD_LATENCY_OVERHEAD_PCT, linestyle="--", linewidth=1,
+               label=f"Ambang {THRESHOLD_LATENCY_OVERHEAD_PCT:.0f}%")
+    ax.set_title("Tier 1.A — Overhead Median C vs A pada Edge vs Packet Loss")
+    ax.set_xlabel("Packet loss Edge (%)")
+    ax.set_ylabel("Overhead C vs A (%)")
+    ax.grid(True, alpha=0.25)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(outpath, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    return str(outpath)
+
+
 def plot_handshake_ttfb_scatter(df: pd.DataFrame, network: str, outpath: Path) -> str:
     """Scatter handshake vs TTFB per skenario untuk sanity check visual."""
     _require_matplotlib()
@@ -523,6 +621,13 @@ def generate_plots(df: pd.DataFrame, report: dict, plots_dir: Path) -> list[str]
     # Ringkasan overhead utama
     generated.append(plot_overhead_c_vs_a(report, plots_dir / "overhead_c_vs_a_ideal.png"))
 
+    # [Tier 1.A] Kurva overhead C vs A pada Edge terhadap packet loss
+    tier1a_plot = plot_tier1a_overhead_vs_loss(
+        report, plots_dir / "tier1a_overhead_vs_loss.png"
+    )
+    if tier1a_plot:
+        generated.append(tier1a_plot)
+
     # Scatter sanity-check hubungan handshake/ttfb
     if "handshake_ms" in df.columns and "ttfb_ms" in df.columns:
         for network in _network_sorted_unique(df):
@@ -562,7 +667,7 @@ def print_summary(report: dict):
     print("  RINGKASAN ANALISIS STATISTIK — PQC TLS 1.3 BENCHMARK")
     print(sep)
 
-    for network in ["ideal", "edge"]:
+    for network in _ordered_report_networks(report):
         if network not in report["metrics"]:
             continue
         print(f"\n  ▶ Jaringan: {NETWORK_LABEL.get(network, network)}")
@@ -600,6 +705,24 @@ def print_summary(report: dict):
                 if e.get("isolasi_terkonfirmasi") is True:
                     flag = " (isolasi terkonfirmasi, r>0.95)"
                 print(f"      Skenario {sc}: r={rstr} (n={e.get('n', 0)}){flag}")
+
+    # ── [Tier 1.A] Tren gap C vs A pada Edge seiring loss ──
+    trend = report.get("tier1a_loss_trend", {})
+    if trend.get("available"):
+        print(f"\n{sep}")
+        print("  TIER 1.A — TREN GAP C vs A PADA EDGE SEIRING PACKET LOSS")
+        print(sep)
+        for metric in ("handshake_ms", "ttlb_ms"):
+            series = trend.get("metrics", {}).get(metric, [])
+            if not series:
+                continue
+            label = METRICS_CONFIG.get(metric, (metric,))[0]
+            print(f"\n    {label} — overhead median C vs A per titik loss:")
+            for pt in series:
+                ov = pt.get("overhead_C_vs_A_pct")
+                ov_str = f"{ov:+.1f}%" if isinstance(ov, (int, float)) and ov == ov else "N/A"
+                sig = "signifikan" if pt.get("significant") else "tdk signifikan"
+                print(f"      loss {pt['loss_pct']:>4.1f}%: {ov_str:>9}  ({sig})")
 
     feas = report.get("feasibility", {})
     print(f"\n{sep}")
@@ -702,6 +825,7 @@ def main():
         report["correlation"][network] = correlation_analysis(df, network)
 
     report["feasibility"] = assess_feasibility(df)
+    report["tier1a_loss_trend"] = tier1a_loss_trend(report)
 
     # ── Analisis grafik ──
     try:

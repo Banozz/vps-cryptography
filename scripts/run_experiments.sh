@@ -30,7 +30,7 @@ CAPTURE_IFACE="${CAPTURE_IFACE:-wlp2s0}"
 CERTS_DIR="${CERTS_DIR:-/measurement/certs}"
 RESULTS_DIR="${RESULTS_DIR:-/measurement/results}"
 SCENARIOS="${SCENARIOS:-A,B,C}"
-NETWORKS="${NETWORKS:-ideal,edge}"
+NETWORKS="${NETWORKS:-ideal,edge_loss0,edge,edge_loss3}"
 PAYLOAD_SIZE_KB="${PAYLOAD_SIZE_KB:-10}"
 WARMUP_ITERS="${WARMUP_ITERS:-20}"
 MEASURE_ITERS="${MEASURE_ITERS:-100}"
@@ -135,10 +135,11 @@ else
   NETEM_OK=true
 fi
 
-# Jika netem tidak tersedia dan NETWORKS mengandung 'edge', hapus 'edge'
+# Jika netem tidak tersedia dan NETWORKS mengandung kondisi Edge, hapus semua
+# blok edge* karena semuanya membutuhkan tc/netem.
 if ! $NETEM_OK && echo "$NETWORKS" | grep -q "edge"; then
-  warn "Menghapus 'edge' dari daftar kondisi jaringan (tc tidak tersedia)"
-  NETWORKS=$(echo "$NETWORKS" | tr ',' '\n' | grep -v "^edge$" | tr '\n' ',' | sed 's/,$//')
+  warn "Menghapus semua kondisi 'edge*' dari daftar jaringan (tc tidak tersedia)"
+  NETWORKS=$(echo "$NETWORKS" | tr ',' '\n' | grep -v "^edge" | tr '\n' ',' | sed 's/,$//')
   if [[ -z "$NETWORKS" ]]; then
     fail "Tidak ada kondisi jaringan yang valid tersisa."
     (( ERRORS++ ))
