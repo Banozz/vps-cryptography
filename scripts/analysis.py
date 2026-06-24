@@ -374,6 +374,37 @@ def plot_metric_boxplots(df: pd.DataFrame, metric: str, outpath: Path) -> str:
     return str(outpath)
 
 
+def plot_metric_boxplot_by_network(
+    df: pd.DataFrame,
+    metric: str,
+    network: str,
+    outpath: Path,
+) -> str:
+    """Boxplot satu metrik untuk satu kondisi jaringan agar skala Y tetap terbaca."""
+    _require_matplotlib()
+
+    title, _, _ = METRICS_CONFIG[metric]
+    fig, ax = plt.subplots(figsize=(7, 5))
+
+    data = []
+    labels = []
+    for sc in SCENARIO_ORDER:
+        vals = df[(df["network"] == network) & (df["scenario"] == sc)][metric].dropna()
+        data.append(vals.tolist() if len(vals) else [np.nan])
+        labels.append(sc)
+
+    _boxplot_with_labels(ax, data, labels)
+    ax.set_title(f"{title} per Skenario - {NETWORK_LABEL.get(network, network)}")
+    ax.set_xlabel("Skenario")
+    ax.set_ylabel(title)
+    ax.grid(True, alpha=0.25)
+
+    fig.tight_layout()
+    fig.savefig(outpath, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    return str(outpath)
+
+
 def plot_cpu_pct_ideal(df: pd.DataFrame, outpath: Path) -> str:
     """CPU utilitas hanya relevan pada jaringan ideal sesuai Bab III."""
     _require_matplotlib()
@@ -473,12 +504,17 @@ def generate_plots(df: pd.DataFrame, report: dict, plots_dir: Path) -> list[str]
     plots_dir.mkdir(parents=True, exist_ok=True)
     generated: list[str] = []
 
+    # Bersihkan plot lama agar hasil analisis terbaru tidak tercampur
+    # dengan format/nama file dari run sebelumnya.
+    for old_plot in plots_dir.glob("*.png"):
+        old_plot.unlink()
+
     # Grafik utama per metrik
     for metric in ["handshake_ms", "ttfb_ms", "ttlb_ms", "cpu_ms", "max_rss_kb"]:
         if metric in df.columns:
-            title, _, _ = METRICS_CONFIG[metric]
-            outpath = plots_dir / f"{metric}_boxplot.png"
-            generated.append(plot_metric_boxplots(df, metric, outpath))
+            for network in _network_sorted_unique(df):
+                outpath = plots_dir / f"{metric}_boxplot_{network}.png"
+                generated.append(plot_metric_boxplot_by_network(df, metric, network, outpath))
 
     # CPU utilitas hanya untuk jaringan ideal
     if "cpu_pct" in df.columns:
