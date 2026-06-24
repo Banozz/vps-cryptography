@@ -76,10 +76,6 @@ PCAP_MIN_VALID_BYTES = 1000
 
 CLOSE_NOTIFY_MAX_FRAME_LEN = 100
 
-# Batas waktu (detik) untuk SATU iterasi openssl s_client. Mencegah proses
-# menggantung tak terbatas ketika FIN/close_notify dari server hilang akibat
-# packet loss (kondisi edge) — apalagi dengan flag -ign_eof yang membuat
-# s_client menunggu server menutup koneksi.
 HANDSHAKE_TIMEOUT_S = int(os.environ.get("HANDSHAKE_TIMEOUT_S", "15"))
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -245,25 +241,58 @@ def parse_metrics_from_pcap(
             return None
         t_ref = min(ch_times)   # t=0, pakai ClientHello pertama (handle HRR)
 
-        # ── Handshake Time: ClientHello[0] → server Finished (type 20) ───────
-        handshake_s = None
-        t_finished_abs = None
-        fin_frame_number = None
-        fin_rows = _tshark_query(
+        # ── Server Finished (type 20, server→client) ────────────────────────
+        server_fin_frame_number = None
+        srv_fin_rows = _tshark_query(
             pcap_path,
             f"tls.handshake.type == 20 and tcp.srcport == {server_port}",
             ["frame.time_epoch", "frame.number"],
             keylog_path,
         )
-        fin_parsed = [
+        srv_fin_parsed = [
             (float(r[0]), int(r[1]))
-            for r in fin_rows
+            for r in srv_fin_rows
             if len(r) >= 2 and r[0].strip() and r[1].strip()
         ]
-        if fin_parsed:
-            fin_parsed.sort(key=lambda x: x[0])
-            t_finished_abs, fin_frame_number = fin_parsed[0]
-            handshake_s = t_finished_abs - t_ref
+        if srv_fin_parsed:
+            srv_fin_parsed.sort(key=lambda x: x[0])
+            _, server_fin_frame_number = srv_fin_parsed[0]
+
+        # ── Handshake Time: ClientHello[0] → CLIENT Finished (type 20) ───────
+        handshake_s = None
+        cli_fin_rows = _tshark_query(
+            pcap_path,
+            f"tls.handshake.type == 20 and tcp.dstport == {server_port}",
+            ["frame.time_epoch"],
+            keylog_path,
+        )
+        cli_fin_times = [float(r[0]) for r in cli_fin_rows if r and r[0].strip()]
+        if cli_fin_times:
+            handshake_s = min(cli_fin_times) - t_ref
+
+        # ── ServerHello → Client ChangeCipherSpec (plaintext, tanpa keylog) ──
+        cert_transfer_s = None
+        sh_rows = _tshark_query(
+            pcap_path,
+            f"tls.handshake.type == 2 and tcp.srcport == {server_port}",
+            ["frame.time_epoch"],
+            keylog_path,
+        )
+        sh_times = [float(r[0]) for r in sh_rows if r and r[0].strip()]
+        ccs_rows = _tshark_query(
+            pcap_path,
+            f"tls.record.content_type == 20 and tcp.dstport == {server_port}",
+            ["frame.time_epoch"],
+            keylog_path,
+        )
+        ccs_times = [float(r[0]) for r in ccs_rows if r and r[0].strip()]
+        if sh_times and ccs_times:
+            cert_transfer_s = min(ccs_times) - min(sh_times)
+        else:
+            logger.warning(
+                "PCAP parse: ServerHello/Client ChangeCipherSpec tidak lengkap "
+                "-- cert_transfer_ms = None."
+            )
 
         # ── Application Data dari server (TTFB & TTLB) ───────────────────────
         app_rows = _tshark_query(
@@ -294,11 +323,11 @@ def parse_metrics_from_pcap(
 
         # ── TTFB: Time-To-First-Byte ─────────────────────────────────
         ttfb_s = None
-        if fin_frame_number is not None:
+        if server_fin_frame_number is not None:
             seg_rows = _tshark_query(
                 pcap_path,
                 (f"tcp.srcport == {server_port} and tcp.len > 0 "
-                 f"and frame.number > {fin_frame_number}"),
+                 f"and frame.number > {server_fin_frame_number}"),
                 ["frame.time_epoch"],
                 keylog_path,
             )
@@ -311,6 +340,7 @@ def parse_metrics_from_pcap(
 
         return {
             "handshake_s": handshake_s,   # None bila PCAP tidak didekripsi (tanpa keylog)
+            "cert_transfer_s": cert_transfer_s,  # ServerHello -> Client CCS (plaintext, tanpa keylog)
             "ttfb_s": ttfb_s,
             "ttlb_s": ttlb_s,
         }
@@ -487,10 +517,6 @@ def run_scenario(scenario_id: str, network_condition: str, output_dir: Path) -> 
         pcap_path = str(pcap_dir / f"{label}.pcap")
         keylog_path = str(pcap_dir / f"{label}.keylog")
 
-        logger.info(
-            f"[sc{scenario_id}|{network_condition}|{label}] "
-            f"▶ memulai handshake (cert: {SCENARIOS[scenario_id]['name']})..."
-        )
         tshark_proc = start_tshark(port, pcap_path)
         try:
             resource_metrics = run_single_handshake(scenario_id, SERVER_HOST, port, keylog_path)
@@ -514,6 +540,8 @@ def run_scenario(scenario_id: str, network_condition: str, output_dir: Path) -> 
                 # ── Metrik waktu (dari PCAP didekripsi, t=0 = ClientHello pertama)
                 "handshake_ms":     (time_metrics["handshake_s"] * 1000
                                      if time_metrics["handshake_s"] is not None else None),
+                "cert_transfer_ms": (time_metrics["cert_transfer_s"] * 1000
+                                     if time_metrics["cert_transfer_s"] is not None else None),
                 "ttfb_ms":          time_metrics["ttfb_s"] * 1000,
                 "ttlb_ms":          time_metrics["ttlb_s"] * 1000,
                 # ── Resource (CPU absolut via getrusage µs; pct & RAM via /usr/bin/time)
@@ -524,16 +552,16 @@ def run_scenario(scenario_id: str, network_condition: str, output_dir: Path) -> 
                 "max_rss_kb":       resource_metrics["max_rss_kb"],
             }
 
-            # Catat SEMUA iterasi (warm-up + data) ke CSV. Ambang warm-up
-            # ditentukan POST-HOC lewat kolom is_warmup (lihat
-            # warmup_convergence.py / analysis.py), tanpa perlu run ulang.
             results.append(row)
             hs_str = (f"{row['handshake_ms']:7.2f}ms"
                       if row['handshake_ms'] is not None else "   n/a   ")
+            ctt_str = (f"{row['cert_transfer_ms']:7.2f}ms"
+                       if row['cert_transfer_ms'] is not None else "   n/a   ")
             tag = "warmup" if is_warmup else " data "
             logger.info(
                 f"[sc{scenario_id}|{network_condition}|{label}] ({tag}) "
                 f"HS={hs_str}  "
+                f"CTT={ctt_str}  "
                 f"TTFB={row['ttfb_ms']:7.2f}ms  "
                 f"TTLB={row['ttlb_ms']:7.2f}ms  "
                 f"CPU={row['cpu_pct_time']}  "
