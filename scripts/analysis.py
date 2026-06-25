@@ -70,6 +70,11 @@ THRESHOLD_CPU_PEAK_PCT = 80.0          # CPU (proksi peak) Skenario C ≤ 80%
 # metric_column -> (label, short, unit)
 METRICS_CONFIG = {
     "handshake_ms": ("Handshake Time (ms)", "Handshake Time", "ms"),
+    # cert_transfer_ms (CTT) = DEKOMPOSISI dari Handshake Time, BUKAN metrik
+    # sejajar. Sengaja TIDAK ditampilkan di tabel ringkasan utama; disajikan di
+    # blok "Dekomposisi Handshake" + plot terpisah. Didaftarkan di sini hanya
+    # agar helper statistik/label/plot bisa memakainya secara seragam.
+    "cert_transfer_ms": ("Certificate Transfer Time (ms)", "Cert Transfer", "ms"),
     "ttfb_ms":      ("TTFB (ms)",           "TTFB",           "ms"),
     "ttlb_ms":      ("TTLB (ms)",           "TTLB",           "ms"),
     "cpu_ms":       ("CPU Time (ms)",       "CPU Time",       "ms"),
@@ -91,6 +96,39 @@ NETWORK_ORDER = ["ideal", "edge_loss0", "edge", "edge_loss3"]
 
 # Peta loss% per blok Edge untuk tren Tier 1.A. 'edge' = titik 1% kanonik.
 EDGE_LOSS_PCT = {"edge_loss0": 0.0, "edge": 1.0, "edge_loss3": 3.0}
+
+
+# ─────────────────────────────────────────────────────────
+# [Tier 1.B / 1.C] Model congestion-window awal & round-trip (ANALITIS)
+#
+# Ini BUKAN eksperimen baru: hanya lensa analitis di atas data yang sudah ada.
+# Tujuannya mengubah hasil dari sekadar "angka overhead" menjadi "mekanisme":
+# apakah selisih antar tipe sertifikat berasal dari (a) round-trip tambahan
+# karena flight handshake server melebihi initcwnd, atau (b) murni biaya
+# transfer byte + komputasi verifikasi (tanpa RTT tambahan).
+# ─────────────────────────────────────────────────────────
+INITCWND_SEGMENTS = 10                       # initcwnd default Linux (RFC 6928)
+MSS_BYTES = 1460                             # MSS Ethernet umum
+INITCWND_BYTES = INITCWND_SEGMENTS * MSS_BYTES  # ~14.600 byte (ambang Kampanakis)
+
+# Estimasi byte "server authentication flight" (Certificate chain + CertVerify)
+# per skenario, yakni bagian flight-1 server yang ukurannya bergantung algoritma.
+#
+# >>> PENTING: DEFAULT di bawah = ESTIMASI LITERATUR (Sikeridis NDSS 2020 Tabel
+# III + ukuran Dilithium2). GANTI dengan ukuran AKTUAL sertifikat Anda agar
+# prediksi valid. Cara mengukur: jumlahkan byte record `Certificate` +
+# `CertificateVerify` dari PCAP (tshark), atau ukuran DER chain (leaf + ICA). <<<
+SERVER_AUTH_BYTES = {
+    "A": 1600,    # ECDSA-P256 : chain ~1,5 KB + CertVerify ~72 B
+    "B": 10200,   # Dilithium2 : chain ~7,8 KB + CertVerify ~2,4 KB
+    "C": 11800,   # p256_dilithium2 (hybrid): chain ~9 KB + CertVerify ~2,5 KB
+}
+# Overhead tetap flight-1 server (ServerHello + EncryptedExtensions + Finished +
+# header record TLS), kira-kira konstan antar skenario.
+SERVER_FIXED_OVERHEAD_BYTES = 300
+# "estimasi_literatur" -> ganti ke "diukur" setelah SERVER_AUTH_BYTES diisi nilai
+# aktual; nilai ini hanya menandai sumber angka pada laporan/peringatan.
+CERT_BYTES_SOURCE = "estimasi_literatur"
 
 
 # ─────────────────────────────────────────────────────────
@@ -134,7 +172,8 @@ def load_results(results_file: Path, keep_warmup: bool = False) -> pd.DataFrame:
         df["cpu_ms"] = pd.to_numeric(df["cpu_ms"], errors="coerce")
 
     # Pastikan kolom metrik waktu numerik (handshake_ms bisa kosong -> NaN).
-    for col in ("handshake_ms", "ttfb_ms", "ttlb_ms", "max_rss_kb"):
+    # cert_transfer_ms (CTT) ikut dikonversi -- dipakai utk dekomposisi handshake.
+    for col in ("handshake_ms", "cert_transfer_ms", "ttfb_ms", "ttlb_ms", "max_rss_kb"):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
 
@@ -304,6 +343,129 @@ def tier1a_loss_trend(report: dict) -> dict:
             })
         trend["metrics"][metric] = series
     return trend
+
+
+# ─────────────────────────────────────────────────────────
+# [Tier 1.B] Flight-1 server vs initcwnd (model congestion-window awal)
+# ─────────────────────────────────────────────────────────
+def _slowstart_rtts(total_bytes: float, initcwnd_bytes: int = INITCWND_BYTES) -> int:
+    """Jumlah round-trip untuk mengirim total_bytes di bawah TCP slow-start.
+
+    Window awal = initcwnd_bytes, lalu berlipat ganda tiap RTT (cwnd*=2).
+    Return 1 = muat dalam jendela awal (tanpa RTT tambahan), 2 = butuh 1 RTT
+    tambahan, dst. Model konservatif (mengabaikan ACK delay / pacing), cukup
+    untuk argumen 'muat / tidak muat' ala Kampanakis.
+    """
+    if total_bytes is None or total_bytes <= 0:
+        return 0
+    sent, cwnd, rtts = 0, initcwnd_bytes, 0
+    while sent < total_bytes:
+        sent += cwnd
+        cwnd *= 2
+        rtts += 1
+    return rtts
+
+
+def tier1b_initcwnd_analysis() -> dict:
+    """Prediksi apakah flight-1 handshake server tiap skenario MUAT di initcwnd.
+
+    Murni analitis (berbasis ukuran artefak + initcwnd), tidak menyentuh CSV.
+    Hasil dipakai Tier 1.C sebagai prediksi jumlah RTT handshake.
+    """
+    out = {
+        "available": True,
+        "cert_bytes_source": CERT_BYTES_SOURCE,
+        "initcwnd_segments": INITCWND_SEGMENTS,
+        "mss_bytes": MSS_BYTES,
+        "initcwnd_bytes": INITCWND_BYTES,
+        "server_fixed_overhead_bytes": SERVER_FIXED_OVERHEAD_BYTES,
+        "scenarios": {},
+    }
+    for sc in SCENARIO_ORDER:
+        auth = SERVER_AUTH_BYTES.get(sc)
+        if auth is None:
+            out["scenarios"][sc] = {"available": False,
+                                    "reason": "SERVER_AUTH_BYTES[sc] belum diisi"}
+            continue
+        flight = SERVER_FIXED_OVERHEAD_BYTES + float(auth)
+        windows = _slowstart_rtts(flight)
+        out["scenarios"][sc] = {
+            "server_auth_bytes": float(auth),
+            "server_flight1_bytes": float(flight),
+            "fits_in_initcwnd": bool(flight <= INITCWND_BYTES),
+            "windows_needed": int(windows),
+            "predicted_handshake_rtt": int(max(1, windows)),
+            "extra_rtt_vs_first_window": int(max(0, windows - 1)),
+        }
+    return out
+
+
+# ─────────────────────────────────────────────────────────
+# [Tier 1.C] Prediksi jumlah RTT handshake vs Handshake/TTLB terukur
+# ─────────────────────────────────────────────────────────
+def tier1c_rtt_model(df: pd.DataFrame, report: dict) -> dict:
+    """Hubungkan prediksi RTT (Tier 1.B) dengan latensi terukur.
+
+    Ide inti: prediksi 'RTT tambahan C/B vs A' (akibat flight server melewati
+    initcwnd) lalu cek apakah SELISIH Handshake terukur konsisten dgn prediksi
+    itu — dinyatakan dalam SATUAN RTT. 1 RTT jaringan diestimasi EMPIRIS dari
+    skenario A (kenaikan Handshake A dari ideal ke tiap blok Edge / jumlah RTT A),
+    sehingga tidak bergantung pada asumsi semantik netem.
+    """
+    b1 = report.get("tier1b_initcwnd", {})
+    scen_b = b1.get("scenarios", {})
+    pred_rtt = {
+        sc: int(scen_b.get(sc, {}).get("predicted_handshake_rtt", 1))
+        for sc in SCENARIO_ORDER
+    }
+
+    def med_hs(sc: str, net: str) -> float:
+        if "handshake_ms" not in df.columns:
+            return float("nan")
+        s = df[(df["scenario"] == sc) & (df["network"] == net)]["handshake_ms"].dropna()
+        return float(s.median()) if len(s) else float("nan")
+
+    hs_a_ideal = med_hs("A", "ideal")
+    out = {
+        "available": "handshake_ms" in df.columns,
+        "cert_bytes_source": CERT_BYTES_SOURCE,
+        "predicted_handshake_rtt": pred_rtt,
+        "predicted_extra_rtt_C_vs_A": int(pred_rtt.get("C", 1) - pred_rtt.get("A", 1)),
+        "rtt_est_basis": "empiris dari skenario A (Handshake net - Handshake ideal)/RTT_A",
+        "networks": {},
+    }
+    if not out["available"]:
+        out["reason"] = "Kolom handshake_ms tidak tersedia di CSV"
+        return out
+
+    for net in _network_sorted_unique(df):
+        hs_a_net = med_hs("A", net)
+        # 1 RTT jaringan ~ kenaikan Handshake A (ideal->net) dibagi jumlah RTT A.
+        if net == "ideal" or not (np.isfinite(hs_a_net) and np.isfinite(hs_a_ideal)):
+            rtt_net = float("nan")
+        else:
+            denom = max(1, pred_rtt.get("A", 1))
+            rtt_net = (hs_a_net - hs_a_ideal) / denom
+        entry = {"rtt_net_ms_est": (float(rtt_net) if np.isfinite(rtt_net) else None),
+                 "scenarios": {}}
+        for sc in SCENARIO_ORDER:
+            hs_sc = med_hs(sc, net)
+            gap_ms = (hs_sc - hs_a_net) if (np.isfinite(hs_sc) and np.isfinite(hs_a_net)) else float("nan")
+            if np.isfinite(gap_ms) and np.isfinite(rtt_net) and rtt_net > 0:
+                gap_rtts = gap_ms / rtt_net
+            else:
+                gap_rtts = float("nan")
+            pred_extra = pred_rtt.get(sc, 1) - pred_rtt.get("A", 1)
+            consistent = (abs(gap_rtts - pred_extra) < 0.5) if np.isfinite(gap_rtts) else None
+            entry["scenarios"][sc] = {
+                "predicted_extra_rtt_vs_A": int(pred_extra),
+                "measured_handshake_median_ms": (float(hs_sc) if np.isfinite(hs_sc) else None),
+                "measured_gap_vs_A_ms": (float(gap_ms) if np.isfinite(gap_ms) else None),
+                "measured_gap_in_rtt_units": (float(gap_rtts) if np.isfinite(gap_rtts) else None),
+                "mechanism_consistent": consistent,
+            }
+        out["networks"][net] = entry
+    return out
 
 
 # ─────────────────────────────────────────────────────────
@@ -614,6 +776,15 @@ def generate_plots(df: pd.DataFrame, report: dict, plots_dir: Path) -> list[str]
                 outpath = plots_dir / f"{metric}_boxplot_{network}.png"
                 generated.append(plot_metric_boxplot_by_network(df, metric, network, outpath))
 
+    # Dekomposisi handshake: CTT disajikan TERPISAH (bukan co-equal di grafik
+    # overhead utama) untuk menegaskan posisinya sebagai komponen handshake.
+    if "cert_transfer_ms" in df.columns:
+        for network in _network_sorted_unique(df):
+            outpath = plots_dir / f"cert_transfer_ms_boxplot_{network}.png"
+            generated.append(
+                plot_metric_boxplot_by_network(df, "cert_transfer_ms", network, outpath)
+            )
+
     # CPU utilitas hanya untuk jaringan ideal
     if "cpu_pct" in df.columns:
         generated.append(plot_cpu_pct_ideal(df, plots_dir / "cpu_pct_ideal_boxplot.png"))
@@ -677,6 +848,10 @@ def print_summary(report: dict):
         )
         print(f"  {'-' * 18}{'-' * 12}{'-' * 12}{'-' * 12}{'-' * 12}{'-' * 10}")
         for metric, (label, short, unit) in METRICS_CONFIG.items():
+            # CTT bukan metrik sejajar -> dilewati di tabel utama; disajikan di
+            # blok "Dekomposisi Handshake" di bawah.
+            if metric == "cert_transfer_ms":
+                continue
             block = report["metrics"].get(network, {})
             if metric not in block:
                 continue
@@ -706,6 +881,30 @@ def print_summary(report: dict):
                     flag = " (isolasi terkonfirmasi, r>0.95)"
                 print(f"      Skenario {sc}: r={rstr} (n={e.get('n', 0)}){flag}")
 
+        # Dekomposisi Handshake -> Certificate Transfer Time (CTT)
+        mblock = report["metrics"].get(network, {})
+        ctt = mblock.get("cert_transfer_ms")
+        hsb = mblock.get("handshake_ms")
+        if ctt:
+            print("\n    Dekomposisi Handshake → Certificate Transfer Time (CTT):")
+            print("      (CTT = segmen transfer sertifikat DI DALAM handshake, bukan metrik sejajar)")
+            for sc in SCENARIO_ORDER:
+                c_med = ctt.get(f"scenario_{sc}", {}).get("median")
+                h_med = (hsb or {}).get(f"scenario_{sc}", {}).get("median")
+                share = (
+                    c_med / h_med * 100
+                    if isinstance(c_med, (int, float)) and isinstance(h_med, (int, float)) and h_med
+                    else None
+                )
+                c_str = f"{c_med:.2f}ms" if isinstance(c_med, (int, float)) else "N/A"
+                sh_str = f"~{share:.0f}% dari Handshake" if isinstance(share, (int, float)) else "N/A"
+                print(f"      Skenario {sc}: CTT median={c_str:>9}  ({sh_str})")
+            wc = ctt.get("wilcoxon_A_vs_C", {})
+            ov = wc.get("overhead_pct")
+            if isinstance(ov, (int, float)) and ov == ov:
+                sig = "signifikan" if wc.get("significant") else "tdk signifikan"
+                print(f"      Isolasi efek sertifikat (CTT C vs A): {ov:+.1f}% ({sig})")
+
     # ── [Tier 1.A] Tren gap C vs A pada Edge seiring loss ──
     trend = report.get("tier1a_loss_trend", {})
     if trend.get("available"):
@@ -723,6 +922,61 @@ def print_summary(report: dict):
                 ov_str = f"{ov:+.1f}%" if isinstance(ov, (int, float)) and ov == ov else "N/A"
                 sig = "signifikan" if pt.get("significant") else "tdk signifikan"
                 print(f"      loss {pt['loss_pct']:>4.1f}%: {ov_str:>9}  ({sig})")
+
+    # ── [Tier 1.B] Flight-1 server vs initcwnd ──
+    b1 = report.get("tier1b_initcwnd", {})
+    if b1.get("available"):
+        print(f"\n{sep}")
+        print("  TIER 1.B — FLIGHT-1 HANDSHAKE SERVER vs initcwnd")
+        print(sep)
+        print(
+            f"    initcwnd = {b1.get('initcwnd_segments')} seg x {b1.get('mss_bytes')} B "
+            f"= {b1.get('initcwnd_bytes')} B"
+        )
+        if b1.get("cert_bytes_source") != "diukur":
+            print("    ⚠ Ukuran sertifikat = ESTIMASI LITERATUR. Ganti SERVER_AUTH_BYTES")
+            print("      dgn byte Certificate+CertificateVerify aktual agar prediksi valid.")
+        print(f"    {'Skn':<5}{'flight-1 (B)':>14}{'muat initcwnd?':>16}{'pred. RTT HS':>14}")
+        print(f"    {'-' * 5}{'-' * 14}{'-' * 16}{'-' * 14}")
+        for sc in SCENARIO_ORDER:
+            s = b1.get("scenarios", {}).get(sc, {})
+            if not s or s.get("available") is False:
+                print(f"    {sc:<5}{'N/A (isi SERVER_AUTH_BYTES)':>44}")
+                continue
+            fit = "ya" if s.get("fits_in_initcwnd") else "TIDAK"
+            print(
+                f"    {sc:<5}{s.get('server_flight1_bytes', float('nan')):>14.0f}"
+                f"{fit:>16}{s.get('predicted_handshake_rtt', 0):>14}"
+            )
+
+    # ── [Tier 1.C] Prediksi RTT handshake vs selisih terukur ──
+    c1 = report.get("tier1c_rtt_model", {})
+    if c1.get("available"):
+        print(f"\n{sep}")
+        print("  TIER 1.C — PREDIKSI RTT HANDSHAKE vs SELISIH TERUKUR (dalam satuan RTT)")
+        print(sep)
+        pe = c1.get("predicted_extra_rtt_C_vs_A")
+        if isinstance(pe, int):
+            print(f"    Prediksi RTT tambahan C vs A (flight server & initcwnd): {pe:+d} RTT")
+        nets_c = [n for n in NETWORK_ORDER if n in c1.get("networks", {})]
+        nets_c += [n for n in c1.get("networks", {}) if n not in NETWORK_ORDER]
+        for net in nets_c:
+            e = c1["networks"][net]
+            rtt = e.get("rtt_net_ms_est")
+            rtt_str = f"{rtt:.1f}ms" if isinstance(rtt, (int, float)) else "N/A (ideal / tak terukur)"
+            print(f"\n    {NETWORK_LABEL.get(net, net)} — 1 RTT jaringan ≈ {rtt_str}")
+            for sc in ["B", "C"]:
+                s = e.get("scenarios", {}).get(sc, {})
+                gm = s.get("measured_gap_vs_A_ms")
+                gr = s.get("measured_gap_in_rtt_units")
+                pe2 = s.get("predicted_extra_rtt_vs_A")
+                gm_str = f"{gm:+.2f}ms" if isinstance(gm, (int, float)) else "N/A"
+                gr_str = f"{gr:.2f}" if isinstance(gr, (int, float)) else "N/A"
+                cons = s.get("mechanism_consistent")
+                cons_str = "konsisten" if cons is True else ("TIDAK konsisten" if cons is False else "—")
+                print(
+                    f"      {sc} vs A: prediksi +{pe2} RTT | terukur {gm_str} ≈ {gr_str} RTT  ({cons_str})"
+                )
 
     feas = report.get("feasibility", {})
     print(f"\n{sep}")
@@ -759,7 +1013,7 @@ def print_summary(report: dict):
     print(sep + "\n")
 
 
-# ─────────────────────────────────────────────────────────
+# ─────────��───────────────────────────────────────────────
 # Main
 # ─────────────────────────────────────────────────────────
 def main():
@@ -826,6 +1080,9 @@ def main():
 
     report["feasibility"] = assess_feasibility(df)
     report["tier1a_loss_trend"] = tier1a_loss_trend(report)
+    # Tier 1.B (analitis, berbasis ukuran artefak) lalu Tier 1.C (memakai 1.B + data).
+    report["tier1b_initcwnd"] = tier1b_initcwnd_analysis()
+    report["tier1c_rtt_model"] = tier1c_rtt_model(df, report)
 
     # ── Analisis grafik ──
     try:
