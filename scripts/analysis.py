@@ -181,7 +181,7 @@ def load_results(results_file: Path, keep_warmup: bool = False) -> pd.DataFrame:
 
 
 def descriptive_stats(series: pd.Series) -> dict:
-    """Statistik deskriptif sesuai Subbab 3.5: median, P95, std."""
+    """Statistik deskriptif sesuai Subbab 3.5: median, P75 (headline), P95 (ekor), std."""
     s = series.dropna()
     if len(s) == 0:
         return {"n": 0}
@@ -191,6 +191,7 @@ def descriptive_stats(series: pd.Series) -> dict:
         "mean": float(s.mean()),
         "std": float(s.std()),
         "p05": float(s.quantile(0.05)),
+        "p75": float(s.quantile(0.75)),
         "p95": float(s.quantile(0.95)),
         "min": float(s.min()),
         "max": float(s.max()),
@@ -213,6 +214,14 @@ def wilcoxon_ranksum(a: pd.Series, b: pd.Series) -> dict:
     overhead_pct = (
         ((median_b - median_a) / median_a * 100) if median_a != 0 else float("nan")
     )
+    # Headline persentil = p75 (selaras metodologi Core Web Vitals: 75% run
+    # mengalami nilai ini atau lebih baik). overhead_pct (median) tetap dihitung
+    # sebagai pembanding tendensi pusat.
+    p75_a = float(a_clean.quantile(0.75))
+    p75_b = float(b_clean.quantile(0.75))
+    overhead_p75_pct = (
+        ((p75_b - p75_a) / p75_a * 100) if p75_a != 0 else float("nan")
+    )
     return {
         "u_stat": float(u_stat),
         "p_value": float(p_value),
@@ -221,6 +230,9 @@ def wilcoxon_ranksum(a: pd.Series, b: pd.Series) -> dict:
         "median_a": float(median_a),
         "median_b": float(median_b),
         "overhead_pct": float(overhead_pct),
+        "p75_a": p75_a,
+        "p75_b": p75_b,
+        "overhead_p75_pct": float(overhead_p75_pct),
         "interpretation": (
             f"Overhead {overhead_pct:+.1f}% — "
             + ("signifikan" if p_value < 0.05 else "TIDAK signifikan")
@@ -336,9 +348,12 @@ def tier1a_loss_trend(report: dict) -> dict:
             series.append({
                 "network": net,
                 "loss_pct": loss,
+                "p75_A": block.get("scenario_A", {}).get("p75"),
+                "p75_C": block.get("scenario_C", {}).get("p75"),
                 "median_A": block.get("scenario_A", {}).get("median"),
                 "median_C": block.get("scenario_C", {}).get("median"),
-                "overhead_C_vs_A_pct": wc.get("overhead_pct"),
+                "overhead_C_vs_A_pct": wc.get("overhead_p75_pct"),
+                "overhead_C_vs_A_median_pct": wc.get("overhead_pct"),
                 "significant": wc.get("significant"),
             })
         trend["metrics"][metric] = series
@@ -483,14 +498,22 @@ def assess_feasibility(df: pd.DataFrame) -> dict:
             return pd.Series(dtype=float)
         return df[(df["scenario"] == sc) & (df["network"] == net)][col].dropna()
 
-    hs_a = get("A", "ideal", "handshake_ms").median()
-    hs_c = get("C", "ideal", "handshake_ms").median()
+    # Headline kelayakan latensi = p75 (selaras Core Web Vitals); median tetap
+    # dihitung sebagai pembanding tendensi pusat.
+    _hs_a_all = get("A", "ideal", "handshake_ms")
+    _hs_c_all = get("C", "ideal", "handshake_ms")
+    hs_a = _hs_a_all.quantile(0.75) if len(_hs_a_all) else float("nan")
+    hs_c = _hs_c_all.quantile(0.75) if len(_hs_c_all) else float("nan")
     hs_ovh = _safe_overhead(hs_a, hs_c)
+    hs_ovh_median = _safe_overhead(_hs_a_all.median(), _hs_c_all.median())
     handshake_available = pd.notna(hs_a) and pd.notna(hs_c)
 
-    ttlb_a = get("A", "ideal", "ttlb_ms").median()
-    ttlb_c = get("C", "ideal", "ttlb_ms").median()
+    _ttlb_a_all = get("A", "ideal", "ttlb_ms")
+    _ttlb_c_all = get("C", "ideal", "ttlb_ms")
+    ttlb_a = _ttlb_a_all.quantile(0.75) if len(_ttlb_a_all) else float("nan")
+    ttlb_c = _ttlb_c_all.quantile(0.75) if len(_ttlb_c_all) else float("nan")
     ttlb_ovh = _safe_overhead(ttlb_a, ttlb_c)
+    ttlb_ovh_median = _safe_overhead(_ttlb_a_all.median(), _ttlb_c_all.median())
 
     # cpu_pct HANYA dibandingkan pada kondisi ideal; di edge terdilusi waktu tunggu I/O.
     cpu_series = get("C", "ideal", "cpu_pct")
@@ -511,8 +534,11 @@ def assess_feasibility(df: pd.DataFrame) -> dict:
 
     return {
         "handshake_available": bool(handshake_available),
+        "latency_percentile_basis": "p75",
         "handshake_overhead_pct": float(hs_ovh),
+        "handshake_overhead_median_pct": float(hs_ovh_median),
         "ttlb_overhead_pct": float(ttlb_ovh),
+        "ttlb_overhead_median_pct": float(ttlb_ovh_median),
         "cpu_p95_pct": float(cpu_c_p95),
         "cpu_max_pct": float(cpu_c_max),
         "cpu_ms_median_A_ideal": float(cpu_ms_a) if pd.notna(cpu_ms_a) else None,
@@ -842,8 +868,9 @@ def print_summary(report: dict):
         if network not in report["metrics"]:
             continue
         print(f"\n  ▶ Jaringan: {NETWORK_LABEL.get(network, network)}")
+        print("    (headline = p75; ekor p95 disajikan terpisah — selaras metodologi Core Web Vitals)")
         print(
-            f"  {'Metrik':<18}{'A median':>12}{'B median':>12}{'C median':>12}"
+            f"  {'Metrik':<18}{'A p75':>12}{'B p75':>12}{'C p75':>12}"
             f"{'C vs A':>12}{'Signif?':>10}"
         )
         print(f"  {'-' * 18}{'-' * 12}{'-' * 12}{'-' * 12}{'-' * 12}{'-' * 10}")
@@ -856,17 +883,36 @@ def print_summary(report: dict):
             if metric not in block:
                 continue
             m = block[metric]
-            a_med = m.get("scenario_A", {}).get("median")
-            b_med = m.get("scenario_B", {}).get("median")
-            c_med = m.get("scenario_C", {}).get("median")
+            a_p75 = m.get("scenario_A", {}).get("p75")
+            b_p75 = m.get("scenario_B", {}).get("p75")
+            c_p75 = m.get("scenario_C", {}).get("p75")
             wc = m.get("wilcoxon_A_vs_C", {})
-            ovh = wc.get("overhead_pct", float("nan"))
+            ovh = wc.get("overhead_p75_pct", float("nan"))
             sig = "✓ Ya" if wc.get("significant") else "✗ Tidak"
             ovh_str = f"{ovh:+.1f}%" if ovh == ovh else "N/A"  # NaN check
             print(
-                f"  {short:<18}{_fmt(a_med, unit):>12}{_fmt(b_med, unit):>12}"
-                f"{_fmt(c_med, unit):>12}{ovh_str:>12}{sig:>10}"
+                f"  {short:<18}{_fmt(a_p75, unit):>12}{_fmt(b_p75, unit):>12}"
+                f"{_fmt(c_p75, unit):>12}{ovh_str:>12}{sig:>10}"
             )
+
+        # Ekor distribusi (p95) untuk metrik latensi — lensa worst-case sekunder.
+        lat_metrics = [
+            mk for mk in ("handshake_ms", "ttfb_ms", "ttlb_ms")
+            if mk in report["metrics"].get(network, {})
+        ]
+        if lat_metrics:
+            print("\n    Ekor p95 (latensi, worst-case) — A / B / C:")
+            for mk in lat_metrics:
+                mm = report["metrics"][network][mk]
+                short_k = METRICS_CONFIG[mk][1]
+                unit_k = METRICS_CONFIG[mk][2]
+                a95 = mm.get("scenario_A", {}).get("p95")
+                b95 = mm.get("scenario_B", {}).get("p95")
+                c95 = mm.get("scenario_C", {}).get("p95")
+                print(
+                    f"      {short_k:<16}{_fmt(a95, unit_k):>12}"
+                    f"{_fmt(b95, unit_k):>12}{_fmt(c95, unit_k):>12}"
+                )
 
         # Korelasi Handshake <-> TTFB
         corr = report.get("correlation", {}).get(network, {})
@@ -889,8 +935,8 @@ def print_summary(report: dict):
             print("\n    Dekomposisi Handshake → Certificate Transfer Time (CTT):")
             print("      (CTT = segmen transfer sertifikat DI DALAM handshake, bukan metrik sejajar)")
             for sc in SCENARIO_ORDER:
-                c_med = ctt.get(f"scenario_{sc}", {}).get("median")
-                h_med = (hsb or {}).get(f"scenario_{sc}", {}).get("median")
+                c_med = ctt.get(f"scenario_{sc}", {}).get("p75")
+                h_med = (hsb or {}).get(f"scenario_{sc}", {}).get("p75")
                 share = (
                     c_med / h_med * 100
                     if isinstance(c_med, (int, float)) and isinstance(h_med, (int, float)) and h_med
@@ -898,9 +944,9 @@ def print_summary(report: dict):
                 )
                 c_str = f"{c_med:.2f}ms" if isinstance(c_med, (int, float)) else "N/A"
                 sh_str = f"~{share:.0f}% dari Handshake" if isinstance(share, (int, float)) else "N/A"
-                print(f"      Skenario {sc}: CTT median={c_str:>9}  ({sh_str})")
+                print(f"      Skenario {sc}: CTT p75={c_str:>9}  ({sh_str})")
             wc = ctt.get("wilcoxon_A_vs_C", {})
-            ov = wc.get("overhead_pct")
+            ov = wc.get("overhead_p75_pct")
             if isinstance(ov, (int, float)) and ov == ov:
                 sig = "signifikan" if wc.get("significant") else "tdk signifikan"
                 print(f"      Isolasi efek sertifikat (CTT C vs A): {ov:+.1f}% ({sig})")
@@ -916,7 +962,7 @@ def print_summary(report: dict):
             if not series:
                 continue
             label = METRICS_CONFIG.get(metric, (metric,))[0]
-            print(f"\n    {label} — overhead median C vs A per titik loss:")
+            print(f"\n    {label} — overhead p75 C vs A per titik loss (p75 lebih tahan thd parse-loss saat loss tinggi):")
             for pt in series:
                 ov = pt.get("overhead_C_vs_A_pct")
                 ov_str = f"{ov:+.1f}%" if isinstance(ov, (int, float)) and ov == ov else "N/A"
@@ -985,14 +1031,16 @@ def print_summary(report: dict):
     if not feas.get("handshake_available", False):
         print("  ⚠ Handshake Time tidak tersedia di CSV (PCAP tidak didekripsi?)")
     print(
-        f"  Overhead Handshake C vs A (ideal): "
+        f"  Overhead Handshake C vs A (ideal, p75): "
         f"{feas.get('handshake_overhead_pct', float('nan')):+.1f}% "
         f"(≤{THRESHOLD_LATENCY_OVERHEAD_PCT}%) → {_pass_str(feas.get('criterion_handshake_passed'))}"
+        f"   [median: {feas.get('handshake_overhead_median_pct', float('nan')):+.1f}%]"
     )
     print(
-        f"  Overhead TTLB      C vs A (ideal): "
+        f"  Overhead TTLB      C vs A (ideal, p75): "
         f"{feas.get('ttlb_overhead_pct', float('nan')):+.1f}% "
         f"(≤{THRESHOLD_LATENCY_OVERHEAD_PCT}%) → {_pass_str(feas.get('criterion_ttlb_passed'))}"
+        f"   [median: {feas.get('ttlb_overhead_median_pct', float('nan')):+.1f}%]"
     )
     print(
         f"  CPU P95 (proksi peak) Skenario C:  "
