@@ -13,12 +13,12 @@ Perubahan skema kolom CSV vs versi lama:
                              peak instan; P95-nya dipakai sebagai PROKSI peak)
   - ram_peak_bytes        -> max_rss_kb (KB)
 
-[W6] Wilcoxon rank-sum (Mann-Whitney U) untuk konfirmasi perbedaan antar skenario.
+[W6] Wilcoxon rank-sum (Mann-Whitney U) untuk konfirmasi perbedaan antar Scenario.
 [W7] Correlation check Pearson Handshake<->TTFB (sanity-check isolasi variabel).
 
 Output:
   - analysis/analysis_report.json : Statistik deskriptif + Wilcoxon + korelasi
-  - plots/*.png                   : Grafik perbandingan antar skenario
+  - plots/*.png                   : Grafik perbandingan antar Scenario
   - (ringkasan dicetak ke terminal)
 """
 
@@ -65,7 +65,7 @@ except Exception as _wu_e:  # pragma: no cover
 # Kriteria evaluasi kelayakan (Subbab 3.5)
 # ─────────────────────────────────────────────────────────
 THRESHOLD_LATENCY_OVERHEAD_PCT = 30.0  # Overhead TTLB/Handshake C vs A ≤ 30%
-THRESHOLD_CPU_PEAK_PCT = 80.0          # CPU (proksi peak) Skenario C ≤ 80%
+THRESHOLD_CPU_PEAK_PCT = 80.0          # CPU (proksi peak) Scenario C ≤ 80%
 
 # metric_column -> (label, short, unit)
 METRICS_CONFIG = {
@@ -91,6 +91,20 @@ NETWORK_LABEL = {
 
 SCENARIO_ORDER = ["A", "B", "C"]
 
+# Gaya visual gambar: pakai WARNA aktif + pembeda redundan (arsiran/garis/
+# marker) secara bersamaan, supaya tetap terbaca saat dicetak hitam-putih
+# atau bagi pembaca buta-warna. Judul gambar sengaja TIDAK dipasang -- beri
+# caption "Gambar X / Fig. X" langsung di manuskrip.
+SCENARIO_COLORS = {"A": "#1f77b4", "B": "#ff7f0e", "C": "#2ca02c"}
+SCENARIO_HATCHES = {"A": "", "B": "//", "C": "xx"}
+SCENARIO_LINESTYLES = {"A": "-", "B": "--", "C": ":"}
+SCENARIO_MARKERS = {"A": "o", "B": "s", "C": "^"}
+SERIES_COLORS = ["#1f77b4", "#d62728", "#2ca02c", "#9467bd", "#ff7f0e"]
+SERIES_LINESTYLES = ["-", "--", "-.", ":", (0, (3, 1, 1, 1))]
+SERIES_MARKERS = ["o", "s", "^", "D", "v"]
+SERIES_HATCHES = ["", "//", "xx", "..", "++"]
+_PALETTE = SERIES_COLORS
+
 # Urutan tampil jaringan: 'ideal' lalu sweep loss Edge (Tier 1.A) terurut by loss.
 NETWORK_ORDER = ["ideal", "edge_loss0", "edge", "edge_loss3"]
 
@@ -112,7 +126,7 @@ MSS_BYTES = 1460                             # MSS Ethernet umum
 INITCWND_BYTES = INITCWND_SEGMENTS * MSS_BYTES  # ~14.600 byte (ambang Kampanakis)
 
 # Estimasi byte "server authentication flight" (Certificate chain + CertVerify)
-# per skenario, yakni bagian flight-1 server yang ukurannya bergantung algoritma.
+# per Scenario, yakni bagian flight-1 server yang ukurannya bergantung algoritma.
 #
 # >>> PENTING: DEFAULT di bawah = ESTIMASI LITERATUR (Sikeridis NDSS 2020 Tabel
 # III + ukuran Dilithium2). GANTI dengan ukuran AKTUAL sertifikat Anda agar
@@ -124,7 +138,7 @@ SERVER_AUTH_BYTES = {
     "C": 11800,   # p256_dilithium2 (hybrid): chain ~9 KB + CertVerify ~2,5 KB
 }
 # Overhead tetap flight-1 server (ServerHello + EncryptedExtensions + Finished +
-# header record TLS), kira-kira konstan antar skenario.
+# header record TLS), kira-kira konstan antar Scenario.
 SERVER_FIXED_OVERHEAD_BYTES = 300
 # "estimasi_literatur" -> ganti ke "diukur" setelah SERVER_AUTH_BYTES diisi nilai
 # aktual; nilai ini hanya menandai sumber angka pada laporan/peringatan.
@@ -281,7 +295,7 @@ def analyze_metric(df: pd.DataFrame, metric: str, network: str) -> dict:
 # ─────────────────────────────────────────────────────────
 def correlation_analysis(df: pd.DataFrame, network: str) -> dict:
     """
-    Pearson r antara Handshake Time dan TTFB per skenario. r tinggi (mis. >0.95)
+    Pearson r antara Handshake Time dan TTFB per Scenario. r tinggi (mis. >0.95)
     = bukti empiris bahwa 'leg aplikasi' ~konstan (TTFB bergerak seiring
     Handshake), bukan sekadar asumsi desain. Juga korelasi (TTFB-Handshake)
     vs CPU untuk deteksi confounder resource-contention.
@@ -322,7 +336,7 @@ def correlation_analysis(df: pd.DataFrame, network: str) -> dict:
 # ─────────────────────────────────────────────────────────
 def tier1a_loss_trend(report: dict) -> dict:
     """
-    Rangkum bagaimana gap Skenario C vs A pada Edge MELEBAR saat loss naik.
+    Rangkum bagaimana gap Scenario C vs A pada Edge MELEBAR saat loss naik.
 
     Hanya membaca blok 'edge*' yang ada di report['metrics'] (0/1/3%); tidak
     menyentuh kondisi 'ideal'. Konsisten dengan guardrail: loss = blok Edge
@@ -382,7 +396,7 @@ def _slowstart_rtts(total_bytes: float, initcwnd_bytes: int = INITCWND_BYTES) ->
 
 
 def tier1b_initcwnd_analysis() -> dict:
-    """Prediksi apakah flight-1 handshake server tiap skenario MUAT di initcwnd.
+    """Prediksi apakah flight-1 handshake server tiap Scenario MUAT di initcwnd.
 
     Murni analitis (berbasis ukuran artefak + initcwnd), tidak menyentuh CSV.
     Hasil dipakai Tier 1.C sebagai prediksi jumlah RTT handshake.
@@ -419,14 +433,6 @@ def tier1b_initcwnd_analysis() -> dict:
 # [Tier 1.C] Prediksi jumlah RTT handshake vs Handshake/TTLB terukur
 # ─────────────────────────────────────────────────────────
 def tier1c_rtt_model(df: pd.DataFrame, report: dict) -> dict:
-    """Hubungkan prediksi RTT (Tier 1.B) dengan latensi terukur.
-
-    Ide inti: prediksi 'RTT tambahan C/B vs A' (akibat flight server melewati
-    initcwnd) lalu cek apakah SELISIH Handshake terukur konsisten dgn prediksi
-    itu — dinyatakan dalam SATUAN RTT. 1 RTT jaringan diestimasi EMPIRIS dari
-    skenario A (kenaikan Handshake A dari ideal ke tiap blok Edge / jumlah RTT A),
-    sehingga tidak bergantung pada asumsi semantik netem.
-    """
     b1 = report.get("tier1b_initcwnd", {})
     scen_b = b1.get("scenarios", {})
     pred_rtt = {
@@ -446,7 +452,7 @@ def tier1c_rtt_model(df: pd.DataFrame, report: dict) -> dict:
         "cert_bytes_source": CERT_BYTES_SOURCE,
         "predicted_handshake_rtt": pred_rtt,
         "predicted_extra_rtt_C_vs_A": int(pred_rtt.get("C", 1) - pred_rtt.get("A", 1)),
-        "rtt_est_basis": "empiris dari skenario A (Handshake net - Handshake ideal)/RTT_A",
+        "rtt_est_basis": "empiris dari Scenario A (Handshake net - Handshake ideal)/RTT_A",
         "networks": {},
     }
     if not out["available"]:
@@ -581,9 +587,23 @@ def _format_units(metric: str, value: float) -> str:
 
 def _boxplot_with_labels(ax, data, labels):
     try:
-        return ax.boxplot(data, tick_labels=labels, showfliers=False)
+        bp = ax.boxplot(data, tick_labels=labels, showfliers=False, patch_artist=True)
     except TypeError:
-        return ax.boxplot(data, labels=labels, showfliers=False)
+        bp = ax.boxplot(data, labels=labels, showfliers=False, patch_artist=True)
+    # Warna isi + arsiran per Scenario (pembeda ganda: warna & pola).
+    for i, box in enumerate(bp.get("boxes", [])):
+        lab = str(labels[i]) if i < len(labels) else ""
+        color = SCENARIO_COLORS.get(lab, _PALETTE[i % len(_PALETTE)])
+        hatch = SCENARIO_HATCHES.get(lab, "")
+        box.set_facecolor(color)
+        box.set_alpha(0.55)
+        box.set_edgecolor("black")
+        if hatch:
+            box.set_hatch(hatch)
+    for med in bp.get("medians", []):
+        med.set_color("black")
+        med.set_linewidth(1.6)
+    return bp
 
 
 def plot_metric_boxplots(df: pd.DataFrame, metric: str, outpath: Path) -> str:
@@ -591,7 +611,7 @@ def plot_metric_boxplots(df: pd.DataFrame, metric: str, outpath: Path) -> str:
     Boxplot per metrik dengan 2 panel:
       - kiri: ideal
       - kanan: edge
-    Setiap panel berisi skenario A/B/C.
+    Setiap panel berisi Scenario A/B/C.
     """
     _require_matplotlib()
 
@@ -607,12 +627,10 @@ def plot_metric_boxplots(df: pd.DataFrame, metric: str, outpath: Path) -> str:
             labels.append(sc)
 
         _boxplot_with_labels(ax, data, labels)
-        ax.set_title(NETWORK_LABEL.get(network, network))
-        ax.set_xlabel("Skenario")
+        ax.set_xlabel(f"Scenario — {NETWORK_LABEL.get(network, network)}")
         ax.set_ylabel(title)
         ax.grid(True, alpha=0.25)
 
-    fig.suptitle(f"{title} per Skenario dan Jaringan")
     fig.tight_layout()
     fig.savefig(outpath, dpi=300, bbox_inches="tight")
     plt.close(fig)
@@ -639,8 +657,7 @@ def plot_metric_boxplot_by_network(
         labels.append(sc)
 
     _boxplot_with_labels(ax, data, labels)
-    ax.set_title(f"{title} per Skenario - {NETWORK_LABEL.get(network, network)}")
-    ax.set_xlabel("Skenario")
+    ax.set_xlabel("Scenario")
     ax.set_ylabel(title)
     ax.grid(True, alpha=0.25)
 
@@ -667,8 +684,7 @@ def plot_cpu_pct_ideal(df: pd.DataFrame, outpath: Path) -> str:
         labels.append(sc)
 
     _boxplot_with_labels(ax, data, labels)
-    ax.set_title("CPU Utilization (%) — Jaringan Ideal")
-    ax.set_xlabel("Skenario")
+    ax.set_xlabel("Scenario")
     ax.set_ylabel("CPU Util (%)")
     ax.grid(True, alpha=0.25)
 
@@ -693,10 +709,13 @@ def plot_overhead_c_vs_a(report: dict, outpath: Path) -> str:
 
     fig, ax = plt.subplots(figsize=(10, 5))
     x = np.arange(len(labels))
-    bars = ax.bar(x, values)
-    ax.axhline(0, linewidth=1)
-    ax.axhline(THRESHOLD_LATENCY_OVERHEAD_PCT, linestyle="--", linewidth=1)
-    ax.set_title("Overhead Median Skenario C terhadap A — Jaringan Ideal")
+    bar_colors = [SERIES_COLORS[i % len(SERIES_COLORS)] for i in range(len(values))]
+    bar_hatches = ["", "//", "xx", "..", "++"]
+    bars = ax.bar(x, values, color=bar_colors, edgecolor="black")
+    for bi, b in enumerate(bars):
+        b.set_hatch(bar_hatches[bi % len(bar_hatches)])
+    ax.axhline(0, linewidth=1, color="black")
+    ax.axhline(THRESHOLD_LATENCY_OVERHEAD_PCT, linestyle="--", linewidth=1, color="red")
     ax.set_ylabel("Overhead (%)")
     ax.set_xticks(x)
     ax.set_xticklabels(labels, rotation=20, ha="right")
@@ -731,7 +750,7 @@ def plot_tier1a_overhead_vs_loss(report: dict, outpath: Path):
 
     fig, ax = plt.subplots(figsize=(8, 5))
     plotted = False
-    for metric in ("handshake_ms", "ttlb_ms", "ttfb_ms"):
+    for i, metric in enumerate(("handshake_ms", "ttlb_ms", "ttfb_ms")):
         series = trend.get("metrics", {}).get(metric, [])
         xs, ys = [], []
         for pt in series:
@@ -740,7 +759,14 @@ def plot_tier1a_overhead_vs_loss(report: dict, outpath: Path):
                 xs.append(pt["loss_pct"])
                 ys.append(ov)
         if len(xs) >= 2:
-            ax.plot(xs, ys, marker="o", label=METRICS_CONFIG[metric][1])
+            ax.plot(
+                xs, ys,
+                color=SERIES_COLORS[i % len(SERIES_COLORS)],
+                linestyle=SERIES_LINESTYLES[i % len(SERIES_LINESTYLES)],
+                marker=SERIES_MARKERS[i % len(SERIES_MARKERS)],
+                linewidth=1.8,
+                label=METRICS_CONFIG[metric][1],
+            )
             plotted = True
 
     if not plotted:
@@ -748,8 +774,7 @@ def plot_tier1a_overhead_vs_loss(report: dict, outpath: Path):
         return None
 
     ax.axhline(THRESHOLD_LATENCY_OVERHEAD_PCT, linestyle="--", linewidth=1,
-               label=f"Ambang {THRESHOLD_LATENCY_OVERHEAD_PCT:.0f}%")
-    ax.set_title("Tier 1.A — Overhead Median C vs A pada Edge vs Packet Loss")
+               color="red", label=f"Ambang {THRESHOLD_LATENCY_OVERHEAD_PCT:.0f}%")
     ax.set_xlabel("Packet loss Edge (%)")
     ax.set_ylabel("Overhead C vs A (%)")
     ax.grid(True, alpha=0.25)
@@ -761,7 +786,7 @@ def plot_tier1a_overhead_vs_loss(report: dict, outpath: Path):
 
 
 def plot_handshake_ttfb_scatter(df: pd.DataFrame, network: str, outpath: Path) -> str:
-    """Scatter handshake vs TTFB per skenario untuk sanity check visual."""
+    """Scatter handshake vs TTFB per Scenario untuk sanity check visual."""
     _require_matplotlib()
 
     fig, ax = plt.subplots(figsize=(7, 5))
@@ -769,12 +794,197 @@ def plot_handshake_ttfb_scatter(df: pd.DataFrame, network: str, outpath: Path) -
         sub = df[(df["network"] == network) & (df["scenario"] == sc)][["handshake_ms", "ttfb_ms"]].dropna()
         if len(sub) == 0:
             continue
-        ax.scatter(sub["handshake_ms"], sub["ttfb_ms"], s=18, alpha=0.7, label=f"Skenario {sc}")
+        ax.scatter(
+            sub["handshake_ms"], sub["ttfb_ms"], s=20, alpha=0.7,
+            color=SCENARIO_COLORS.get(sc, None),
+            marker=SCENARIO_MARKERS.get(sc, "o"),
+            edgecolor="black", linewidths=0.3,
+            label=f"Scenario {sc}",
+        )
 
-    ax.set_title(f"Handshake vs TTFB — {NETWORK_LABEL.get(network, network)}")
     ax.set_xlabel("Handshake Time (ms)")
     ax.set_ylabel("TTFB (ms)")
     ax.grid(True, alpha=0.25)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(outpath, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    return str(outpath)
+
+
+def plot_two_regime_overhead(
+    report: dict,
+    outpath: Path,
+    edge_network: str = "edge",
+    basis: str = "p75",
+) -> str | None:
+    """[GAMBAR INTI] Grouped bar 'dua-rezim': overhead C vs A (dan B vs A) untuk
+    Handshake & TTLB pada Ideal vs Edge dalam satu pandang.
+
+    Pesan utama: overhead sertifikat RUNTUH begitu RTT jaringan mendominasi
+    (Ideal -> Edge). Basis persentil default = headline p75 (selaras metodologi
+    Core Web Vitals); set basis='median' untuk lensa tendensi pusat.
+    """
+    _require_matplotlib()
+    ov_key = "overhead_p75_pct" if basis == "p75" else "overhead_pct"
+    metrics = ["handshake_ms", "ttlb_ms"]
+    metric_labels = [METRICS_CONFIG[m][1] for m in metrics]
+    regimes = [
+        ("ideal", "Ideal"),
+        (edge_network, "Edge"),
+    ]
+    comparisons = [
+        ("wilcoxon_A_vs_C", "C vs A"),
+        ("wilcoxon_A_vs_B", "B vs A"),
+    ]
+
+    series = []  # (label, [nilai overhead per metrik])
+    for comp_key, comp_lbl in comparisons:
+        for net_key, net_lbl in regimes:
+            vals = []
+            for m in metrics:
+                block = report.get("metrics", {}).get(net_key, {}).get(m, {})
+                wc = block.get(comp_key, {})
+                vals.append(wc.get(ov_key, float("nan")))
+            series.append((f"{comp_lbl} ({net_lbl})", vals))
+
+    if not any(any(v == v for v in vals) for _, vals in series):
+        return None
+
+    fig, ax = plt.subplots(figsize=(9, 5))
+    x = np.arange(len(metrics))
+    n = max(1, len(series))
+    width = 0.8 / n
+    for i, (lbl, vals) in enumerate(series):
+        offs = (i - (n - 1) / 2) * width
+        bars = ax.bar(
+            x + offs, vals, width, label=lbl,
+            color=SERIES_COLORS[i % len(SERIES_COLORS)],
+            hatch=SERIES_HATCHES[i % len(SERIES_HATCHES)],
+            edgecolor="black",
+        )
+        for bar, v in zip(bars, vals):
+            if v == v:  # bukan NaN
+                ax.annotate(
+                    f"{v:+.1f}%",
+                    (bar.get_x() + bar.get_width() / 2, bar.get_height()),
+                    textcoords="offset points",
+                    xytext=(0, 3),
+                    ha="center",
+                    fontsize=8,
+                )
+    ax.axhline(0, linewidth=1, color="black")
+    ax.set_xticks(x)
+    ax.set_xticklabels(metric_labels)
+    ax.set_ylabel(f"Overhead vs A (%) - basis {basis}")
+    ax.grid(True, axis="y", alpha=0.25)
+    ax.legend(fontsize=8, ncol=2)
+    fig.tight_layout()
+    fig.savefig(outpath, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    return str(outpath)
+
+
+def plot_ecdf(df: pd.DataFrame, metric: str, network: str, outpath: Path) -> str | None:
+    """[Ekor] ECDF tiga Scenario A/B/C untuk satu metrik pada satu jaringan.
+
+    Menyingkap anomali EKOR (mis. ekor B menjulur akibat retransmisi pada loss
+    tinggi) yang disembunyikan oleh statistik titik -- cara jujur menampilkan
+    distribusi penuh, gaya Kampanakis Fig. 8. Garis p95 ditandai per Scenario.
+    """
+    _require_matplotlib()
+    if metric not in df.columns:
+        return None
+    title, short, unit = METRICS_CONFIG[metric]
+    fig, ax = plt.subplots(figsize=(7, 5))
+    plotted = False
+    for sc in SCENARIO_ORDER:
+        vals = df[(df["network"] == network) & (df["scenario"] == sc)][metric].dropna()
+        vals = vals[np.isfinite(vals)].sort_values()
+        if len(vals) == 0:
+            continue
+        y = np.arange(1, len(vals) + 1) / len(vals)
+        color = SCENARIO_COLORS.get(sc, None)
+        ls = SCENARIO_LINESTYLES.get(sc, "-")
+        line = ax.step(
+            vals.values, y, where="post", color=color, linestyle=ls,
+            linewidth=1.8, label=f"Scenario {sc} (n={len(vals)})",
+        )
+        p95 = float(vals.quantile(0.95))
+        ax.axvline(p95, linestyle=ls, linewidth=1, alpha=0.6,
+                   color=line[0].get_color())
+        plotted = True
+    if not plotted:
+        plt.close(fig)
+        return None
+    ax.axhline(0.95, linestyle="--", linewidth=1, color="grey", alpha=0.7,
+               label="p95")
+    ax.set_xlabel(f"{title}")
+    ax.set_ylabel("Proporsi kumulatif run (ECDF)")
+    ax.set_ylim(0, 1.02)
+    ax.grid(True, alpha=0.25)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(outpath, dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    return str(outpath)
+
+
+def plot_flight1_vs_initcwnd(report: dict, outpath: Path) -> str | None:
+    """[Tier 1.B/1.D] Bar ukuran flight-1 handshake server per Scenario vs ambang
+    initcwnd (~14.600 B).
+
+    Menampilkan secara visual bahwa semua flight berada di bawah 'tebing' satu
+    congestion window awal (sehingga prediksi 0 RTT tambahan). Caption hati-hati
+    bila ukuran byte sertifikat masih estimasi literatur.
+    """
+    _require_matplotlib()
+    b1 = report.get("tier1b_initcwnd", {})
+    scen = b1.get("scenarios", {})
+    labels, values = [], []
+    for sc in SCENARIO_ORDER:
+        info = scen.get(sc, {})
+        fb = info.get("server_flight1_bytes")
+        if fb is None:
+            continue
+        labels.append(f"Scenario {sc}")
+        values.append(float(fb))
+    if not values:
+        return None
+    initcwnd = float(b1.get("initcwnd_bytes", INITCWND_BYTES))
+    fig, ax = plt.subplots(figsize=(7, 5))
+    x = np.arange(len(labels))
+    bar_colors = [SCENARIO_COLORS.get(l.split()[-1], _PALETTE[bi % len(_PALETTE)])
+                  for bi, l in enumerate(labels)]
+    bars = ax.bar(x, values, color=bar_colors, edgecolor="black")
+    for bi, b in enumerate(bars):
+        h = SCENARIO_HATCHES.get(labels[bi].split()[-1], "")
+        if h:
+            b.set_hatch(h)
+    ax.axhline(initcwnd, linestyle="--", linewidth=1.5, color="red",
+               label=f"initcwnd = {initcwnd:,.0f} B")
+    for bar, v in zip(bars, values):
+        pct = (v / initcwnd * 100) if initcwnd else float("nan")
+        ax.annotate(
+            f"{v:,.0f} B\n({pct:.0f}% initcwnd)",
+            (bar.get_x() + bar.get_width() / 2, bar.get_height()),
+            textcoords="offset points",
+            xytext=(0, 3),
+            ha="center",
+            fontsize=8,
+        )
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels)
+    ax.set_ylabel("Ukuran flight-1 server (byte)")
+    src = b1.get("cert_bytes_source", CERT_BYTES_SOURCE)
+    # if src != "diukur":
+    #     ax.text(0.02, 0.97, "BYTE = ESTIMASI LITERATUR",
+    #             transform=ax.transAxes, ha="left", va="top", fontsize=8,
+    #             color="red",
+    #             bbox=dict(boxstyle="round", facecolor="white",
+    #                       edgecolor="red", alpha=0.85))
+    ax.set_ylim(0, max(max(values), initcwnd) * 1.18)
+    ax.grid(True, axis="y", alpha=0.25)
     ax.legend()
     fig.tight_layout()
     fig.savefig(outpath, dpi=300, bbox_inches="tight")
@@ -833,6 +1043,33 @@ def generate_plots(df: pd.DataFrame, report: dict, plots_dir: Path) -> list[str]
                     df, network, plots_dir / f"handshake_ttfb_scatter_{network}.png"
                 )
             )
+
+    # [GAMBAR INTI] Dua-rezim: overhead C/B vs A pada Ideal vs Edge dalam 1 pandang
+    two_regime = plot_two_regime_overhead(
+        report, plots_dir / "two_regime_overhead.png"
+    )
+    if two_regime:
+        generated.append(two_regime)
+
+    # [Ekor] ECDF handshake & TTLB pada Edge loss tertinggi (anomali ekor p95)
+    nets_present = _network_sorted_unique(df)
+    tail_net = "edge_loss3" if "edge_loss3" in nets_present else (
+        nets_present[-1] if nets_present else None
+    )
+    if tail_net:
+        for metric in ("handshake_ms", "ttlb_ms"):
+            ecdf = plot_ecdf(
+                df, metric, tail_net, plots_dir / f"ecdf_{metric}_{tail_net}.png"
+            )
+            if ecdf:
+                generated.append(ecdf)
+
+    # [Tier 1.B/1.D] Flight-1 server vs ambang initcwnd (mekanisme 'tebing' RTT)
+    flight_plot = plot_flight1_vs_initcwnd(
+        report, plots_dir / "flight1_vs_initcwnd.png"
+    )
+    if flight_plot:
+        generated.append(flight_plot)
 
     return generated
 
@@ -925,7 +1162,7 @@ def print_summary(report: dict):
                 flag = ""
                 if e.get("isolasi_terkonfirmasi") is True:
                     flag = " (isolasi terkonfirmasi, r>0.95)"
-                print(f"      Skenario {sc}: r={rstr} (n={e.get('n', 0)}){flag}")
+                print(f"      Scenario {sc}: r={rstr} (n={e.get('n', 0)}){flag}")
 
         # Dekomposisi Handshake -> Certificate Transfer Time (CTT)
         mblock = report["metrics"].get(network, {})
@@ -944,7 +1181,7 @@ def print_summary(report: dict):
                 )
                 c_str = f"{c_med:.2f}ms" if isinstance(c_med, (int, float)) else "N/A"
                 sh_str = f"~{share:.0f}% dari Handshake" if isinstance(share, (int, float)) else "N/A"
-                print(f"      Skenario {sc}: CTT p75={c_str:>9}  ({sh_str})")
+                print(f"      Scenario {sc}: CTT p75={c_str:>9}  ({sh_str})")
             wc = ctt.get("wilcoxon_A_vs_C", {})
             ov = wc.get("overhead_p75_pct")
             if isinstance(ov, (int, float)) and ov == ov:
@@ -1043,7 +1280,7 @@ def print_summary(report: dict):
         f"   [median: {feas.get('ttlb_overhead_median_pct', float('nan')):+.1f}%]"
     )
     print(
-        f"  CPU P95 (proksi peak) Skenario C:  "
+        f"  CPU P95 (proksi peak) Scenario C:  "
         f"{feas.get('cpu_p95_pct', float('nan')):.1f}% "
         f"(≤{THRESHOLD_CPU_PEAK_PCT}%) → {_pass_str(feas.get('criterion_cpu_passed'))}"
     )
@@ -1104,7 +1341,7 @@ def main():
     print(f"Memuat data dari: {args.results_file}")
     df = load_results(args.results_file)
     print(
-        f"Total baris: {len(df)} | Skenario: {sorted(df['scenario'].unique())} | "
+        f"Total baris: {len(df)} | Scenario: {sorted(df['scenario'].unique())} | "
         f"Jaringan: {sorted(df['network'].unique())}"
     )
 

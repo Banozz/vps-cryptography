@@ -275,10 +275,19 @@ def parse_metrics_from_pcap(
         sh_rows = _tshark_query(
             pcap_path,
             f"tls.handshake.type == 2 and tcp.srcport == {server_port}",
-            ["frame.time_epoch"],
+            ["frame.time_epoch", "frame.number"],
             keylog_path,
         )
-        sh_times = [float(r[0]) for r in sh_rows if r and r[0].strip()]
+        sh_parsed = [
+            (float(r[0]), int(r[1]))
+            for r in sh_rows
+            if len(r) >= 2 and r[0].strip() and r[1].strip()
+        ]
+        sh_times = [t for t, _ in sh_parsed]
+        sh_frame_number = None
+        if sh_parsed:
+            sh_parsed.sort(key=lambda x: x[0])
+            sh_frame_number = sh_parsed[0][1]
         ccs_rows = _tshark_query(
             pcap_path,
             f"tls.record.content_type == 20 and tcp.dstport == {server_port}",
@@ -292,6 +301,38 @@ def parse_metrics_from_pcap(
             logger.warning(
                 "PCAP parse: ServerHello/Client ChangeCipherSpec tidak lengkap "
                 "-- cert_transfer_ms = None."
+            )
+
+        # -- Server flight-1 bytes: ServerHello -> Server Finished (di kabel) --
+        # Total byte payload TCP yang dikirim server pada flight pertama
+        # (ServerHello + EncryptedExtensions + Certificate + CertificateVerify +
+        #  Finished). Tidak butuh dekripsi: kita hanya menjumlahkan ukuran byte
+        # (tcp.len), bukan isi record terenkripsi. Retransmisi (akibat packet
+        # loss) dikecualikan agar nilai = ukuran flight sebenarnya, bukan ulangan.
+        server_flight1_bytes = None
+        if sh_frame_number is not None and server_fin_frame_number is not None:
+            flight_rows = _tshark_query(
+                pcap_path,
+                (f"tcp.srcport == {server_port} and tcp.len > 0 "
+                 f"and not tcp.analysis.retransmission "
+                 f"and frame.number >= {sh_frame_number} "
+                 f"and frame.number <= {server_fin_frame_number}"),
+                ["tcp.len"],
+                keylog_path,
+            )
+            flight_bytes = 0
+            for r in flight_rows:
+                if r and r[0].strip():
+                    try:
+                        flight_bytes += int(r[0])
+                    except ValueError:
+                        continue
+            if flight_bytes > 0:
+                server_flight1_bytes = flight_bytes
+        if server_flight1_bytes is None:
+            logger.warning(
+                "PCAP parse: flight-1 server tidak dapat diukur "
+                "(ServerHello/Server Finished tidak lengkap) -- server_flight1_bytes = None."
             )
 
         # ── Application Data dari server (TTFB & TTLB) ───────────────────────
@@ -343,6 +384,7 @@ def parse_metrics_from_pcap(
             "cert_transfer_s": cert_transfer_s,  # ServerHello -> Client CCS (plaintext, tanpa keylog)
             "ttfb_s": ttfb_s,
             "ttlb_s": ttlb_s,
+            "server_flight1_bytes": server_flight1_bytes,
         }
 
     except subprocess.TimeoutExpired:
@@ -544,6 +586,7 @@ def run_scenario(scenario_id: str, network_condition: str, output_dir: Path) -> 
                                      if time_metrics["cert_transfer_s"] is not None else None),
                 "ttfb_ms":          time_metrics["ttfb_s"] * 1000,
                 "ttlb_ms":          time_metrics["ttlb_s"] * 1000,
+                "server_flight1_bytes": time_metrics["server_flight1_bytes"],
                 # ── Resource (CPU absolut via getrusage µs; pct & RAM via /usr/bin/time)
                 "cpu_usr_s":        resource_metrics["cpu_usr_s"],
                 "cpu_sys_s":        resource_metrics["cpu_sys_s"],
@@ -564,6 +607,7 @@ def run_scenario(scenario_id: str, network_condition: str, output_dir: Path) -> 
                 f"CTT={ctt_str}  "
                 f"TTFB={row['ttfb_ms']:7.2f}ms  "
                 f"TTLB={row['ttlb_ms']:7.2f}ms  "
+                f"F1={row['server_flight1_bytes']}B  "
                 f"CPU={row['cpu_pct_time']}  "
                 f"CPUms={row['cpu_ms']:6.3f}ms  "
                 f"RAM={row['max_rss_kb']}KB"
